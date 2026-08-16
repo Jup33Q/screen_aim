@@ -14,10 +14,13 @@ swift build                  # Mac 端，Swift 6.x
 
 | 步骤 | 命令 | 通过标准 |
 |---|---|---|
-| 离线自检 | `swift run ScreenAim --self-test` | 4 标记全检出，映射误差 < 2pt，输出"自检通过 ✅" |
-| 生成标记 | `swift run ScreenAim --make-markers ./markers` | markers/ 下 4 张 PNG |
-| 悬浮标定 | `swift run ScreenAim --calibrate` | 四角出现标记，日志输出 FPS 与瞄准点坐标 |
+| 离线自检 | `swift run ScreenAim --self-test` | 8 标记全检出，全量/遮挡任一角/遮挡相邻双角映射误差均 < 2pt，输出"自检通过 ✅" |
+| 纯 Swift 自检 | `swift run ScreenAim --swift-self-test` | 同上（iOS 端同款检测器 + RANSAC 路径） |
+| 生成标记 | `swift run ScreenAim --make-markers ./markers` | markers/ 下 8 张 PNG |
+| 悬浮标定 | `swift run ScreenAim --calibrate` | 四角 + 四边中点出现标记，日志输出 FPS（含 det=xxms）与瞄准点坐标 |
 | 手机联调 | `swift run ScreenAim --calibrate --serve 9100` | 中央出现配对二维码，手机连上后二维码隐藏 |
+| 检测基准 | `python3 tools/make_bench_scenes.py && python3 tools/bench_detect.py 'scenes/bench20*.png'` | 命中率/σ 汇总（基准场景可再生） |
+| 滤波基准 | `swift run ScreenAim --swift-seq scenes/static48_*.png` | One Euro 滤波前后静止 σ 对比 |
 
 ## iOS 端构建
 

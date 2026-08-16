@@ -12,23 +12,39 @@
 | `ArucoMarker` | 检测结果：`markerId` / `center`（帧像素）/ `corner0` |
 | `detectMarkersInBGRABuffer:width:height:` | 紧凑 BGRA → ArUco 检测（DICT_4X4_50，亚像素角点精化） |
 | `detectMarkersInImageFile:` | 离线自检用 |
-| `generateTestSceneToFile:error:` | 生成 1000×800 四角标记自检场景 |
+| `generateTestSceneToFile:error:` | 生成 1000×800 自检场景（8 标记：4 角 + 4 边中点，边长 100px） |
 | `markerPNGWithId:sidePixels:` | 内存生成单标记 PNG（供 NSImage 直接显示） |
 | `generateMarkersToDirectory:count:sidePixels:error:` | 批量生成校准标记到目录 |
 | `mapPoint:srcPoints:dstPoints:success:` | 4 组对应点求单应并映射一个点 |
+| `mapPointRANSAC:srcPoints:dstPoints:success:` | ≥4 组对应点 `findHomography(RANSAC, 3.0)` 映射（冗余标记，ADR-007） |
 
 OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 在 `Package.swift` 顶部改。
+
+### `Sources/ScreenAimCore/`（纯 Swift，iOS/macOS 双端共享）
+
+| API | 说明 |
+|---|---|
+| `ArucoDetector` | 纯 Swift ArUco 检测（DICT_4X4_50 id0–7）：自适应阈值 + 连通域 + 字典匹配；亚像素角点精化（法向剖面 + TLS 直线拟合，Phase 1.2） |
+| `DetectedMarker` | 检测结果：`id` / `center` / `corners`（帧像素，左上原点） |
+| `Homography` | 3×3 单应：`init(src:dst:)` 四点 DLT；`init(ransacSrc:dst:thresholdPx:maxIter:)` RANSAC + Accelerate `dsyev_` 最小二乘精化（ADR-007） |
+| `ScreenLocalizer` | 检测→映射→滤波编排：`screenCornerMap` ≥4 项即可；输出侧内嵌 One Euro 滤波（`aimFilterEnabled` 可关，`aimFilterX/Y` 可调参） |
+| `OneEuroFilter` | One Euro 低通（minCutoff=1.0 / beta=0.5 / dCutoff=1.0），时间戳外部传入；连续 10 帧无输出由 Localizer/Sampler 重置 |
+| `ArucoDictionary` | id0–7 位图表 + 4 旋转查表（精确 → 汉明距 1 纠错） |
 
 ### `Sources/ScreenAim/main.swift`
 
 | 类型/函数 | 说明 |
 |---|---|
-| `ScreenSampler` | 帧处理中枢：`start()` 起 SCStream；`processJPEG` / `processBGRA` 两条入口汇到同一检测映射管线；`screenCornerMap` 填 4 个标记的屏幕坐标后输出 `onAim` |
+| `ScreenSampler` | 帧处理中枢：`start()` 起 SCStream；`processJPEG` / `processBGRA` 两条入口汇到同一检测映射管线（RANSAC 映射 + One Euro 输出滤波）；`screenCornerMap` 填 ≥4 个标记的屏幕坐标后输出 `onAim`；FPS 日志带 `det=xxms` 检测耗时 |
 | `primaryIPv4()` | 本机主网卡 IPv4（优先 en0），配对二维码用 |
 | `makeQRImage` / `makeStyledQRImage` | 二维码 NSImage 生成（普通 / 小程序码圆点风格） |
 | `FrameServer` | TCP 帧服务 + Bonjour 发布；`onFrame` 交 JPEG，`onConnect` 通知已配对 |
-| `Calibrator` | 透明悬浮标定层：四角标记（自带白色底卡保证静区）、中央配对二维码、IP 变化看守、ESC 退出；`run()` 阻塞进主循环 |
+| `Calibrator` | 透明悬浮标定层：8 标记（4 角 + 4 边中点，自带白色底卡保证静区）、中央配对二维码、IP 变化看守、ESC 退出；`run()` 阻塞进主循环；localAim 写 `scenes/localaim_*.csv`（列含 detect_ms/src） |
+
+命令行自检/基准：`--self-test`（OpenCV 管线，8 标记 + 遮挡模拟）、`--swift-self-test`
+（纯 Swift 管线同款判据）、`--swift-detect IMG [GT] [--verbose]`（双检测器对比）、
+`--swift-seq IMGS... [--cutoff C --beta B]`（序列 σ 基准，Phase 1.3 验收工具）。
 
 ## iOS 端（ios/AimPhone，XcodeGen 工程）
 

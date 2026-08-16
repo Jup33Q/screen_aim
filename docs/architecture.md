@@ -22,11 +22,12 @@ iPhone 相机对着 Mac 屏幕 → Mac 识别屏幕四角的 ArUco 标记 → �
 │ （或 ScreenCaptureKit 本机采屏 ──► processBGRA）    │
 │        │                                          │
 │        ▼                                          │
-│ OpenCVBridge：ArUco 检测（DICT_4X4_50）             │
-│        │ 4 个角标记中心                             │
+│ OpenCVBridge：ArUco 检测（DICT_4X4_50，id0–7）     │
+│        │ 8 个标记中心（匹配 ≥4 即求解）              │
 │        ▼                                          │
-│ getPerspectiveTransform ──► 帧中心映射 ──► onAim    │
-│ Calibrator：透明悬浮标定层（四角标记 + 配对二维码）    │
+│ findHomography(RANSAC) ──► 帧中心映射 ──► One Euro │
+│ 滤波 ──► onAim                                    │
+│ Calibrator：透明悬浮标定层（8 标记 + 配对二维码）    │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -34,10 +35,11 @@ iPhone 相机对着 Mac 屏幕 → Mac 识别屏幕四角的 ArUco 标记 → �
 
 | 模块 | 文件 | 职责 | 依赖方向 |
 |---|---|---|---|
-| OpenCVBridge | `Sources/OpenCVBridge/` | ObjC++ 封装 `cv::aruco` 检测、标记生成、单应映射 | 只依赖 OpenCV |
-| ScreenSampler | `Sources/ScreenAim/main.swift` | 帧入口（SCStream / JPEG）→ 检测 → 映射 → `onAim` 回调 | → OpenCVBridge |
+| OpenCVBridge | `Sources/OpenCVBridge/` | ObjC++ 封装 `cv::aruco` 检测、标记生成、单应映射（`getPerspectiveTransform` / `findHomography` RANSAC） | 只依赖 OpenCV |
+| ScreenAimCore | `Sources/ScreenAimCore/` | 纯 Swift 定位核（双端共享）：ArUco 检测（含亚像素角点精化）、单应（四点 DLT / RANSAC+最小二乘）、One Euro 输出滤波 | 只依赖 Accelerate |
+| ScreenSampler | `Sources/ScreenAim/main.swift` | 帧入口（SCStream / JPEG）→ 检测 → RANSAC 映射 → One Euro 滤波 → `onAim` 回调 | → OpenCVBridge / ScreenAimCore |
 | FrameServer | 同上 | TCP 帧服务 + Bonjour 广播 | → ScreenSampler.processJPEG |
-| Calibrator | 同上 | 透明悬浮标定层：四角标记、配对二维码、自动填映射表 | → ScreenSampler / FrameServer |
+| Calibrator | 同上 | 透明悬浮标定层：8 标记（4 角 + 4 边中点，ADR-007）、配对二维码、自动填映射表 | → ScreenSampler / FrameServer |
 | CameraStreamer | `ios/AimPhone/CameraStreamer.swift` | 相机采集、JPEG 推流、连接管理、扫码配对 | 无（叶子模块） |
 | GimbalManager | `ios/AimPhone/GimbalManager.swift` | DockKit 云台状态/按键事件 → 注入的动作闭包 | 无（叶子模块） |
 | ContentView | `ios/AimPhone/ContentView.swift` | 全部 UI + 手势状态机 + 云台按键动作注入 | → 上面两者 |
@@ -55,7 +57,7 @@ iPhone 相机对着 Mac 屏幕 → Mac 识别屏幕四角的 ArUco 标记 → �
 
 | 队列/上下文 | 跑什么 |
 |---|---|
-| `screenaim.sampler`（串行） | SCStream 帧回调 → `processBGRA` |
+| `screenaim.sampler`（串行） | SCStream 帧回调 → `processBGRA`（检测→映射→滤波） |
 | `screenaim.server` / `screenaim.conn` | NWListener  accept 与读帧 |
 | main runloop（Mac） | Calibrator 窗口、定时器、`onAim` 消费方 |
 | `aimphone.capture`（串行，iOS） | 采集回调、JPEG 编码、扫码识别、曝光/变焦/翻转配置 |

@@ -26,13 +26,13 @@ swift build           # Swift 6.x，无需 Xcode 工程
 ## 用法
 
 ```bash
-# 1. 离线自检：生成测试场景 -> 检测 4 角标记 -> homography 验证
+# 1. 离线自检：生成测试场景 -> 检测 8 标记 -> RANSAC 单应验证（含遮挡模拟）
 swift run ScreenAim --self-test
 
-# 2. 生成 4 个校准标记 PNG（用于贴在/显示在屏幕四角）
+# 2. 生成 8 个校准标记 PNG（id0–3 四角 + id4–7 四边中点）
 swift run ScreenAim --make-markers ./markers
 
-# 3. 透明悬浮标定层（推荐）：四角悬浮小标记，自动标定 + 实时输出瞄准坐标
+# 3. 透明悬浮标定层（推荐）：8 个悬浮小标记（4 角 + 4 边中点），自动标定 + 实时输出瞄准坐标
 swift run ScreenAim --calibrate                          # 默认 24pt 标记
 swift run ScreenAim --calibrate --marker-size 48         # 距离远/光线差时调大
 swift run ScreenAim --calibrate --inset 40 --pad 12      # 可调边距/白卡边距
@@ -77,8 +77,14 @@ open ios/AimPhone.xcodeproj          # 打开后选择你的 Development Team，
 |---|---|---|
 | 64pt | ~100% | < 0.1pt |
 | 24pt（默认） | ~100% | ≈ 0.05pt |
-| 20pt | ~0% | — |
+| 20pt | ~0% → 见下注 | — |
 | 16pt | 0% | — |
+
+注：上表是 Phase 1 优化前的真机实测。Phase 1.1–1.3 后（冗余 8 标记 + 亚像素角点
+精化 + One Euro 滤波），合成基准场景（tools/make_bench_scenes.py，1280×720 帧）
+数字为：24pt 静止 σr 0.171 → 0.080pt（-53%）；20pt 中距失焦组命中率 56% → 72%；
+20pt 远距组（帧上 8–15px）34% → 44%。真机复测用 `--calibrate --serve` 跑会话后
+`tools/plot_localaim.py` 分析 `scenes/localaim_*.csv`（含 detect_ms 列）。
 
 透明悬浮层为每个标记附带 8pt 白色底卡，保证任意桌面背景下的 ArUco 静区；
 窗口点击穿透、置顶、不遮挡正常屏幕内容，ESC 退出。
@@ -92,8 +98,8 @@ open ios/AimPhone.xcodeproj          # 打开后选择你的 Development Team，
 |---|---|---|
 | 屏幕采集 | ScreenCaptureKit | 相同；或替换为 NDI 接收（`NDIlib_recv_*`） |
 | 标记检测 | `OpenCVBridge.detectMarkers` | 相同，可换 AprilTag 提高远距离鲁棒性 |
-| 坐标映射 | `OpenCVBridge.mapPoint`（homography） | 相同，加 One Euro Filter 消抖 |
-| 标定 UI | `screenCornerMap` 硬编码 | 全屏 NSWindow 显示四角标记，自动读取屏幕分辨率 |
+| 坐标映射 | `OpenCVBridge.mapPointRANSAC`（冗余 8 标记 + RANSAC）+ One Euro 滤波 | 相同 |
+| 标定 UI | 全屏悬浮层 8 标记自动标定 | 相同 |
 | 坐标消费 | print | UDP/WebSocket 发给手机，或 `CGWarpMouseCursorPosition` 控制鼠标 |
 
 ## 注意
