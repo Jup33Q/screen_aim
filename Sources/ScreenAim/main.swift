@@ -831,7 +831,9 @@ final class Calibrator: NSObject {
             CGPoint(x: W - m - s / 2, y: m + s / 2),        // 1 右上
             CGPoint(x: W - m - s / 2, y: H - m - s / 2),    // 2 右下
             CGPoint(x: m + s / 2, y: H - m - s / 2),        // 3 左下
-            CGPoint(x: W / 2, y: m + s / 2),                // 4 上中
+            // WARNING: 上中标记要躲物理刘海——safeAreaInsets.top 以下才是完整显示区，
+            // 贴顶放会被刘海盖住上半截（外接屏 safeTop=0，退化为与其他边一致）
+            CGPoint(x: W / 2, y: screen.safeAreaInsets.top + m + s / 2),  // 4 上中
             CGPoint(x: W - m - s / 2, y: H / 2),            // 5 右中
             CGPoint(x: W / 2, y: H - m - s / 2),            // 6 下中
             CGPoint(x: m + s / 2, y: H / 2),                // 7 左中
@@ -970,9 +972,11 @@ final class Calibrator: NSObject {
         if let port = servePort {
             // 手机推流模式：TCP 收 JPEG 帧 -> 检测
             do {
-                // DEBUG: 手机端本机识别结果悬浮标签（屏幕底部居中胶囊，点击穿透跟随主覆盖层）
+                // DEBUG: 手机端本机识别结果悬浮标签（点击穿透跟随主覆盖层）。
+                // WARNING: 不能贴屏幕底边中央——下中标记 id6 的白卡占距底 16–56pt，
+                // 胶囊抬高到 88pt 躲开（ADR-007 边中点布局引入的遮挡冲突）
                 let dbgW: CGFloat = 380, dbgH: CGFloat = 30
-                let dbgBg = NSView(frame: NSRect(x: W / 2 - dbgW / 2, y: 24,
+                let dbgBg = NSView(frame: NSRect(x: W / 2 - dbgW / 2, y: 88,
                                                  width: dbgW, height: dbgH))
                 dbgBg.wantsLayer = true
                 dbgBg.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.5).cgColor
@@ -1013,10 +1017,12 @@ final class Calibrator: NSObject {
                 let sliderW: CGFloat = 210   // 滑杆胶囊（滑杆 + 数值标签）
                 let panelH: CGFloat = 44
                 let panelW = qrBtnW + closeBtnW + recBtnW + btnGap * 3 + sliderW
-                // 避开刘海/菜单栏安全区：面板贴在安全区下沿再留 8pt
+                // 避开刘海/菜单栏安全区，并额外下移 64pt：
+                // WARNING: 上中标记 id4 的白卡占距顶 16–56pt（ADR-007 边中点布局），
+                // 面板若贴在安全区下沿会正好压住它（外接屏 safeTop=0 时全压）
                 let safeTop = screen.safeAreaInsets.top
                 let btnPanel = NSPanel(contentRect: NSRect(x: W / 2 - panelW / 2,
-                                                           y: H - safeTop - panelH - 8,
+                                                           y: H - safeTop - panelH - 8 - 64,
                                                            width: panelW, height: panelH),
                                        styleMask: [.borderless, .nonactivatingPanel],
                                        backing: .buffered, defer: false)
