@@ -32,7 +32,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 直接对图片文件做检测（用于离线自检）
 - (NSArray<ArucoMarker*>*)detectMarkersInImageFile:(NSString*)path;
 
-/// 生成一张测试场景：白底画布四角各放一个标记（带静区），用于自检
+/// 生成一张测试场景：白底画布四角 + 四边中点共 8 个标记（id 0-7，带静区），用于自检
 + (BOOL)generateTestSceneToFile:(NSString*)path error:(NSError* _Nullable*)error;
 
 /// 生成单个标记的 PNG 数据（内存中，用于直接贴到 NSImage）
@@ -50,6 +50,13 @@ NS_ASSUME_NONNULL_BEGIN
            srcPoints:(NSArray<NSValue*>*)src
            dstPoints:(NSArray<NSValue*>*)dst
              success:(BOOL* _Nullable)ok;
+
+/// 由 ≥4 组对应点用 RANSAC 求单应并映射一个点（冗余 8 标记模式，见 ADR-007）。
+/// src/dst 各 ≥4 个 CGPoint (NSValue)；内点不足 4 或求解退化时 ok 置 NO。
++ (CGPoint)mapPointRANSAC:(CGPoint)point
+                srcPoints:(NSArray<NSValue*>*)src
+                dstPoints:(NSArray<NSValue*>*)dst
+                  success:(BOOL* _Nullable)ok;
 
 @end
 

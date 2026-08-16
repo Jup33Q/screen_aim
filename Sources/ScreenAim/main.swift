@@ -38,7 +38,8 @@ func loadBGRA(from path: String) -> (Data, Int, Int)? {
 /// 帧处理中枢：ScreenCaptureKit 采集 / JPEG 推流两条入口汇入同一检测映射管线。
 ///
 /// 两条入口：`start()` 起 SCStream 本机采屏；`processJPEG(_:)` 由 FrameServer 喂手机帧。
-/// 填好 `screenCornerMap`（4 个标记的屏幕坐标）后，每帧把帧中心映射到屏幕坐标并经 `onAim` 输出。
+/// 填好 `screenCornerMap`（≥4 个标记的屏幕坐标，冗余 8 标记见 ADR-007）后，
+/// 每帧把帧中心映射到屏幕坐标并经 `onAim` 输出。
 final class ScreenSampler: NSObject, SCStreamOutput {
 
     private var stream: SCStream?
@@ -49,7 +50,7 @@ final class ScreenSampler: NSObject, SCStreamOutput {
     private var detectMsSum = 0.0
     private var detectCount = 0
 
-    // 屏幕四角标记 ID -> 屏幕坐标（左上角原点，单位：点）
+    // 屏幕定位码 ID -> 屏幕坐标（左上角原点，单位：点）；≥4 项即可映射（冗余 8 标记，ADR-007）
     // dst 用什么单位，映射结果就是什么单位；homography 自动吸收采样降分辨率的比例
     var screenCornerMap: [Int32: CGPoint] = [:]
 
@@ -136,7 +137,7 @@ final class ScreenSampler: NSObject, SCStreamOutput {
         tickFPS()
     }
 
-    /// 核心处理：紧凑 BGRA 帧 → ArUco 检测 → 4 角齐全时 homography 映射帧中心。
+    /// 核心处理：紧凑 BGRA 帧 → ArUco 检测 → 匹配 ≥4 个标记时 RANSAC 单应映射帧中心。
     /// - Parameters:
     ///   - compact: 无行 padding 的 BGRA 数据（`process(_:)` 已处理对齐）
     ///   - w / h: 帧像素尺寸
@@ -156,8 +157,9 @@ final class ScreenSampler: NSObject, SCStreamOutput {
                          m.markerId, m.center.x, m.center.y))
         }
 
-        // 四角标记齐全 -> homography -> 帧中心(瞄准点)映射到屏幕坐标
-        guard screenCornerMap.count == 4 else { return }
+        // 匹配 ≥4 个已知标记 -> RANSAC 单应 -> 帧中心(瞄准点)映射到屏幕坐标（ADR-007：
+        // 任一角被遮挡或单帧掉检时仍有输出，RANSAC 剔除个别错位点）
+        guard screenCornerMap.count >= 4 else { return }
         var src: [NSValue] = []
         var dst: [NSValue] = []
         for m in markers {
@@ -165,13 +167,13 @@ final class ScreenSampler: NSObject, SCStreamOutput {
             src.append(NSValue(point: m.center))
             dst.append(NSValue(point: screenPt))
         }
-        guard src.count == 4 else { return }
+        guard src.count >= 4 else { return }
 
         var ok = ObjCBool(false)
         // 帧中心 = 瞄准点；结果单位与 screenCornerMap 一致（点坐标，左上角原点）
-        let mapped = OpenCVBridge.mapPoint(CGPoint(x: w / 2, y: h / 2),
-                                           srcPoints: src, dstPoints: dst,
-                                           success: &ok)
+        let mapped = OpenCVBridge.mapPointRANSAC(CGPoint(x: w / 2, y: h / 2),
+                                                 srcPoints: src, dstPoints: dst,
+                                                 success: &ok)
         if ok.boolValue {
             print(String(format: "瞄准点 -> 屏幕坐标 (%.0f, %.0f)", mapped.x, mapped.y))
             onAim?(mapped)
@@ -580,7 +582,8 @@ final class FrameServer {
 }
 
 // MARK: - 透明悬浮标定层
-/// 全屏透明、点击穿透的悬浮窗口：四角悬浮 ArUco 标记 +（推流模式）中央配对二维码。
+/// 全屏透明、点击穿透的悬浮窗口：四角 + 四边中点共 8 个悬浮 ArUco 标记（ADR-007）
+/// +（推流模式）中央配对二维码。
 ///
 /// - 每个标记自带白色圆角底卡，保证任意桌面背景下的 ArUco 静区（WARNING: 无静区无法检测）
 /// - 标记中心坐标自动写入 `ScreenSampler.screenCornerMap`，无需手工标定
@@ -599,8 +602,8 @@ final class Calibrator: NSObject {
     var qrButton: ActionButton?  // Mac 端配对码开关按钮（悬浮 NSPanel 上）
     var currentPayload = ""
     var debugLabel: NSTextField?  // 手机端本机识别结果（localAim）的悬浮 debug 文本
-    var centers: [CGPoint] = []        // 当前 4 个标记中心的屏幕点坐标（左上角原点）
-    var markerCards: [NSView] = []     // 当前 4 块白卡视图（rebuildMarkers 重建）
+    var centers: [CGPoint] = []        // 当前 8 个标记中心的屏幕点坐标（左上角原点）
+    var markerCards: [NSView] = []     // 当前 8 块白卡视图（rebuildMarkers 重建）
     var screenW: CGFloat = 0           // 屏幕点尺寸（calib 负载用）
     var screenH: CGFloat = 0
 
@@ -652,7 +655,8 @@ final class Calibrator: NSObject {
         }
     }
 
-    /// 按当前 markerSize 重建四角标记（白卡 + ArUco 位图），并刷新 centers。
+    /// 按当前 markerSize 重建标记（白卡 + ArUco 位图），并刷新 centers。
+    /// 布局：四角 id0–3 + 四边中点 id4–7（冗余 8 标记，ADR-007），任取检出 ≥4 个即可建单应。
     /// 滑杆实时调整时调用；先生成全部位图再替换视图，避免中间态缺角。
     @discardableResult
     func rebuildMarkers(in content: NSView, screen: NSScreen) -> [CGPoint] {
@@ -664,11 +668,15 @@ final class Calibrator: NSObject {
             CGPoint(x: W - m - s / 2, y: m + s / 2),        // 1 右上
             CGPoint(x: W - m - s / 2, y: H - m - s / 2),    // 2 右下
             CGPoint(x: m + s / 2, y: H - m - s / 2),        // 3 左下
+            CGPoint(x: W / 2, y: m + s / 2),                // 4 上中
+            CGPoint(x: W - m - s / 2, y: H / 2),            // 5 右中
+            CGPoint(x: W / 2, y: H - m - s / 2),            // 6 下中
+            CGPoint(x: m + s / 2, y: H / 2),                // 7 左中
         ]
         // 按 Retina 物理像素生成，保证小尺寸下边缘锐利
         let px = Int32((s * screen.backingScaleFactor).rounded())
         var images: [NSImage] = []
-        for id in 0..<4 {
+        for id in 0..<8 {
             guard let png = OpenCVBridge.markerPNG(withId: Int32(id), sidePixels: px),
                   let img = NSImage(data: png) else { return centers }  // 生成失败则保留旧标记
             images.append(img)
@@ -694,15 +702,14 @@ final class Calibrator: NSObject {
         return centers
     }
 
-    /// 当前标定映射表的 calib 控制帧（protocol.md §6）：握手下发与滑杆调整后广播共用
+    /// 当前标定映射表的 calib 控制帧（protocol.md §6）：握手下发与滑杆调整后广播共用。
+    /// markers 与 centers 同源（8 项：4 角 + 4 边中点），协议格式不变只扩条目
     func calibPayload() -> Data? {
-        guard centers.count == 4 else { return nil }
-        let markers: [String: [Double]] = [
-            "0": [Double(centers[0].x), Double(centers[0].y)],
-            "1": [Double(centers[1].x), Double(centers[1].y)],
-            "2": [Double(centers[2].x), Double(centers[2].y)],
-            "3": [Double(centers[3].x), Double(centers[3].y)],
-        ]
+        guard centers.count == 8 else { return nil }
+        var markers: [String: [Double]] = [:]
+        for (i, c) in centers.enumerated() {
+            markers["\(i)"] = [Double(c.x), Double(c.y)]
+        }
         let payload: [String: Any] = [
             "type": "calib",
             "screenW": Double(screenW), "screenH": Double(screenH),
@@ -737,7 +744,7 @@ final class Calibrator: NSObject {
 
         let W = f.width, H = f.height
         screenW = W; screenH = H
-        // 四角标记（白色底卡 + ArUco 位图）；rebuildMarkers 同时刷新 self.centers
+        // 8 个定位码（白色底卡 + ArUco 位图）；rebuildMarkers 同时刷新 self.centers
         if let content = win.contentView {
             rebuildMarkers(in: content, screen: screen)
         }
@@ -745,7 +752,6 @@ final class Calibrator: NSObject {
         win.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
         window = win
-
         // 配对二维码（仅手机推流模式）：圆角方形卡，屏幕正中央，手机扫码自动获取 IP/端口
         if let port = servePort, let ip = primaryIPv4() {
             let payload = "{\"host\":\"\(ip)\",\"port\":\(port)}"
@@ -794,11 +800,10 @@ final class Calibrator: NSObject {
             if ev.keyCode == 53 { NSApp.terminate(nil) }
         }
 
-        // 采样器：dst 直接用标记中心的屏幕点坐标（左上角原点）
+        // 采样器：dst 直接用标记中心的屏幕点坐标（左上角原点），8 项全量（ADR-007）
         let sampler = ScreenSampler()
-        sampler.screenCornerMap = [
-            0: centers[0], 1: centers[1], 2: centers[2], 3: centers[3],
-        ]
+        sampler.screenCornerMap = Dictionary(uniqueKeysWithValues:
+            centers.enumerated().map { (Int32($0.offset), $0.element) })
         if let port = servePort {
             // 手机推流模式：TCP 收 JPEG 帧 -> 检测
             do {
@@ -932,10 +937,8 @@ final class Calibrator: NSObject {
                     if let content = win.contentView {
                         self.rebuildMarkers(in: content, screen: screen)
                     }
-                    sampler.screenCornerMap = [
-                        0: self.centers[0], 1: self.centers[1],
-                        2: self.centers[2], 3: self.centers[3],
-                    ]
+                    sampler.screenCornerMap = Dictionary(uniqueKeysWithValues:
+                        self.centers.enumerated().map { (Int32($0.offset), $0.element) })
                     if let data = self.calibPayload(),
                        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                         server.sendControl(obj)   // 广播新标定表给所有已连手机（protocol.md §7）
@@ -977,26 +980,27 @@ final class Calibrator: NSObject {
                         let n = msg["markers"] as? Int ?? 0
                         // 兼容旧客户端：无 detected 字段时按数量退化为空集合；无 detect_ms 时记 0
                         let detected = (msg["detected"] as? [Int]) ?? []
-                        let missing = (msg["missing"] as? [Int]) ?? [0, 1, 2, 3].filter { !detected.contains($0) }
+                        let missing = (msg["missing"] as? [Int]) ?? (0...7).filter { !detected.contains($0) }
                         let detMs = msg["detect_ms"] as? Double ?? 0
                         if let x = msg["x"] as? Double, let y = msg["y"] as? Double {
-                            print(String(format: "LOCALAIM iPhone: screen=(%.1f, %.1f) markers=%d/4 detected=%@ det=%.1fms",
+                            print(String(format: "LOCALAIM iPhone: screen=(%.1f, %.1f) markers=%d/8 detected=%@ det=%.1fms",
                                          x, y, n, detected.map(String.init).joined(separator: ","), detMs))
                             self?.logLocalAim(markers: n, ids: detected, x: x, y: y,
                                               detectMs: detMs, src: "tcp")
-                            let text = String(format: "iPhone 瞄准: (%.1f, %.1f)  标记 %d/4", x, y, n)
+                            let text = String(format: "iPhone 瞄准: (%.1f, %.1f)  标记 %d/8", x, y, n)
                             DispatchQueue.main.async { [weak self] in
                                 self?.debugLabel?.stringValue = text
                                 self?.debugLabel?.textColor = .white
                             }
                         } else {
                             let missStr = missing.map(String.init).joined(separator: ",")
-                            print(String(format: "LOCALAIM iPhone: 未集齐 4 角（检出 %d，缺 [%@]），无瞄准点 det=%.1fms",
+                            // 冗余 8 标记下 <4 个匹配才无输出（ADR-007），比旧"缺角即无输出"宽松得多
+                            print(String(format: "LOCALAIM iPhone: 检出不足（%d 个，缺 [%@]），无瞄准点 det=%.1fms",
                                          n, missStr, detMs))
                             self?.logLocalAim(markers: n, ids: detected, x: nil, y: nil,
                                               detectMs: detMs, src: "tcp")
                             DispatchQueue.main.async { [weak self] in
-                                self?.debugLabel?.stringValue = "iPhone 瞄准: 缺定位码 [\(missStr)]（检出 \(n)/4）"
+                                self?.debugLabel?.stringValue = "iPhone 瞄准: 缺定位码 [\(missStr)]（检出 \(n)/8）"
                                 self?.debugLabel?.textColor = .systemYellow
                             }
                         }
@@ -1045,43 +1049,59 @@ final class Calibrator: NSObject {
 
 // MARK: - 入口
 if CommandLine.arguments.contains("--self-test") {
-    // 离线自检：生成测试场景 -> 检测 4 个角标记 -> homography 映射帧中心
+    // 离线自检：生成测试场景 -> 检测 8 个标记 -> RANSAC 单应映射帧中心（含遮挡模拟，ADR-007）
     let scenePath = "/tmp/screenaim_test_scene.png"
     do {
         try OpenCVBridge.generateTestScene(toFile: scenePath)
         let found = OpenCVBridge().detectMarkers(inImageFile: scenePath)
-        guard found.count == 4 else {
-            print("自检失败: 期望 4 个标记，检测到 \(found.count) 个")
+        guard found.count == 8 else {
+            print("自检失败: 期望 8 个标记，检测到 \(found.count) 个")
             exit(1)
         }
         for m in found.sorted(by: { $0.markerId < $1.markerId }) {
             print(String(format: "  id=%d center=(%.1f, %.1f)",
                          m.markerId, m.center.x, m.center.y))
         }
-        // 场景是 1000x800 画布，四角标记中心在 (200,200) (800,200) (800,600) (200,600)
-        // 定义逻辑屏幕区域为标记中心围成的矩形，映射帧中心应落在矩形正中
-        var src: [NSValue] = [], dst: [NSValue] = []
+        // 场景是 1000x800 画布（标记边长 100）：角标记中心 (100,100)(900,100)(900,700)(100,700)，
+        // 边中点 (500,100)(900,400)(500,700)(100,400)；逻辑区域为角标记中心围成的 800x600 矩形
         let logical: [Int32: CGPoint] = [
-            0: CGPoint(x: 0, y: 0), 1: CGPoint(x: 600, y: 0),
-            2: CGPoint(x: 600, y: 400), 3: CGPoint(x: 0, y: 400),
+            0: CGPoint(x: 0, y: 0), 1: CGPoint(x: 800, y: 0),
+            2: CGPoint(x: 800, y: 600), 3: CGPoint(x: 0, y: 600),
+            4: CGPoint(x: 400, y: 0), 5: CGPoint(x: 800, y: 300),
+            6: CGPoint(x: 400, y: 600), 7: CGPoint(x: 0, y: 300),
         ]
-        for m in found {
-            guard let d = logical[Int32(m.markerId)] else { continue }
-            src.append(NSValue(point: m.center))
-            dst.append(NSValue(point: d))
+        // 遮挡模拟：dropIDs 从检测集中剔除后仍应求解成功且误差 < 2pt
+        func mappedError(drop dropIDs: Set<Int32>) -> Double? {
+            var src: [NSValue] = [], dst: [NSValue] = []
+            for m in found where !dropIDs.contains(Int32(m.markerId)) {
+                guard let d = logical[Int32(m.markerId)] else { continue }
+                src.append(NSValue(point: m.center))
+                dst.append(NSValue(point: d))
+            }
+            var ok = ObjCBool(false)
+            let mapped = OpenCVBridge.mapPointRANSAC(CGPoint(x: 500, y: 400),
+                                                     srcPoints: src, dstPoints: dst,
+                                                     success: &ok)
+            guard ok.boolValue else { return nil }
+            return hypot(mapped.x - 400, mapped.y - 300)
         }
-        var ok = ObjCBool(false)
-        let mapped = OpenCVBridge.mapPoint(CGPoint(x: 500, y: 400),
-                                           srcPoints: src, dstPoints: dst,
-                                           success: &ok)
-        guard ok.boolValue else { print("自检失败: homography 求解失败"); exit(1) }
-        print(String(format: "  帧中心(500,400) -> 逻辑坐标 (%.1f, %.1f)，期望约 (300, 200)",
-                     mapped.x, mapped.y))
-        let err = hypot(mapped.x - 300, mapped.y - 200)
-        if err > 2 {
-            print("自检失败: 映射误差 \(err)pt")
-            exit(1)
+        if let err = mappedError(drop: []) {
+            print(String(format: "  全量 8 标记: 帧中心(500,400) -> 逻辑坐标，误差 %.2fpt（期望≈(400,300)）", err))
+            guard err <= 2 else { print("自检失败: 映射误差 \(err)pt"); exit(1) }
+        } else { print("自检失败: 全量标记单应求解失败"); exit(1) }
+        // 逐一遮挡每个角标记：输出不得中断
+        for corner: Int32 in [0, 1, 2, 3] {
+            guard let err = mappedError(drop: [corner]) else {
+                print("自检失败: 遮挡角标记 id=\(corner) 后无输出"); exit(1)
+            }
+            print(String(format: "  遮挡角 id=%d: 误差 %.2fpt", corner, err))
+            guard err <= 2 else { print("自检失败: 遮挡 id=\(corner) 后误差 \(err)pt"); exit(1) }
         }
+        // 遮挡两个相邻角（不相对）：误差 < 2pt
+        if let err = mappedError(drop: [0, 1]) {
+            print(String(format: "  遮挡相邻双角 id=0,1: 误差 %.2fpt", err))
+            guard err <= 2 else { print("自检失败: 遮挡双角后误差 \(err)pt"); exit(1) }
+        } else { print("自检失败: 遮挡相邻双角后无输出"); exit(1) }
         print("自检通过 ✅ (场景图: \(scenePath))")
         exit(0)
     } catch {
@@ -1101,22 +1121,27 @@ if CommandLine.arguments.contains("--swift-self-test") {
         }
         let localizer = ScreenLocalizer()
         localizer.detector.debugLog = true
-        // 场景 1000x800，标记中心 (200,200)(800,200)(800,600)(200,600)，逻辑矩形 600x400
+        // 场景 1000x800（标记边长 100）：角标记中心 (100,100)(900,100)(900,700)(100,700)，
+        // 边中点 (500,100)(900,400)(500,700)(100,400)；逻辑矩形 800x600（角）+ 边中点
         localizer.screenCornerMap = [
-            0: CGPoint(x: 0, y: 0), 1: CGPoint(x: 600, y: 0),
-            2: CGPoint(x: 600, y: 400), 3: CGPoint(x: 0, y: 400),
+            0: CGPoint(x: 0, y: 0), 1: CGPoint(x: 800, y: 0),
+            2: CGPoint(x: 800, y: 600), 3: CGPoint(x: 0, y: 600),
+            4: CGPoint(x: 400, y: 0), 5: CGPoint(x: 800, y: 300),
+            6: CGPoint(x: 400, y: 600), 7: CGPoint(x: 0, y: 300),
         ]
         let result = data.withUnsafeBytes { ptr in
             localizer.localize(bgra: ptr.baseAddress!, width: w, height: h, bytesPerRow: w * 4)
         }
-        guard result.markers.count == 4 else {
-            print("自检失败: 期望 4 个标记，Swift 检测器检出 \(result.markers.count) 个")
-            for m in result.markers { print("  误检 id=\(m.id) center=(\(m.center.x), \(m.center.y))") }
+        guard result.markers.count == 8 else {
+            print("自检失败: 期望 8 个标记，Swift 检测器检出 \(result.markers.count) 个")
+            for m in result.markers { print("  检出 id=\(m.id) center=(\(m.center.x), \(m.center.y))") }
             exit(1)
         }
         let truth: [Int: CGPoint] = [
-            0: CGPoint(x: 200, y: 200), 1: CGPoint(x: 800, y: 200),
-            2: CGPoint(x: 800, y: 600), 3: CGPoint(x: 200, y: 600),
+            0: CGPoint(x: 100, y: 100), 1: CGPoint(x: 900, y: 100),
+            2: CGPoint(x: 900, y: 700), 3: CGPoint(x: 100, y: 700),
+            4: CGPoint(x: 500, y: 100), 5: CGPoint(x: 900, y: 400),
+            6: CGPoint(x: 500, y: 700), 7: CGPoint(x: 100, y: 400),
         ]
         for m in result.markers {
             let t = truth[m.id]!
@@ -1126,10 +1151,31 @@ if CommandLine.arguments.contains("--swift-self-test") {
             if err > 2 { print("自检失败: id=\(m.id) 中心误差 \(err)px"); exit(1) }
         }
         guard let aim = result.aim else { print("自检失败: 单应求解失败"); exit(1) }
-        print(String(format: "  帧中心(500,400) -> 逻辑坐标 (%.1f, %.1f)，期望约 (300, 200)",
+        print(String(format: "  帧中心(500,400) -> 逻辑坐标 (%.1f, %.1f)，期望约 (400, 300)",
                      aim.x, aim.y))
-        let err = hypot(aim.x - 300, aim.y - 200)
+        let err = hypot(aim.x - 400, aim.y - 300)
         if err > 2 { print("自检失败: 映射误差 \(err)pt"); exit(1) }
+        // 遮挡模拟（纯 Swift RANSAC 路径）：用检出中心子集直接求解，判据同 --self-test
+        func swiftMappedError(drop dropIDs: Set<Int>) -> Double? {
+            var src: [CGPoint] = [], dst: [CGPoint] = []
+            for m in result.markers where !dropIDs.contains(m.id) {
+                guard let d = localizer.screenCornerMap[m.id] else { continue }
+                src.append(m.center); dst.append(d)
+            }
+            guard let h = Homography(ransacSrc: src, dst: dst) else { return nil }
+            let p = h.map(CGPoint(x: 500, y: 400))
+            return hypot(p.x - 400, p.y - 300)
+        }
+        for corner in [0, 1, 2, 3] {
+            guard let e = swiftMappedError(drop: [corner]), e <= 2 else {
+                print("自检失败: 遮挡角 id=\(corner) 后无输出或误差超标"); exit(1)
+            }
+            print(String(format: "  遮挡角 id=%d: 误差 %.2fpt", corner, e))
+        }
+        guard let e = swiftMappedError(drop: [0, 1]), e <= 2 else {
+            print("自检失败: 遮挡相邻双角后无输出或误差超标"); exit(1)
+        }
+        print(String(format: "  遮挡相邻双角 id=0,1: 误差 %.2fpt", e))
         print("Swift 检测器自检通过 ✅")
         exit(0)
     } catch {
@@ -1245,8 +1291,9 @@ if let di = CommandLine.arguments.firstIndex(of: "--swift-detect"),
 if CommandLine.arguments.contains("--make-markers") {
     let dir = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "./markers"
     do {
-        try OpenCVBridge.generateMarkers(toDirectory: dir, count: 4, sidePixels: 400)
-        print("已生成 4 个校准标记到 \(dir)")
+        // 8 个：id0–3 四角 + id4–7 四边中点（ADR-007）
+        try OpenCVBridge.generateMarkers(toDirectory: dir, count: 8, sidePixels: 400)
+        print("已生成 8 个校准标记到 \(dir)")
     } catch {
         fputs("错误: \(error.localizedDescription)\n", stderr)
         exit(1)

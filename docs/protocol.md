@@ -61,13 +61,17 @@ IP 变化时 Mac 端每 5 秒自动重生成二维码；手机一连上，二维
 
 ```json
 {"type":"calib","screenW":1728.0,"screenH":1117.0,
- "markers":{"0":[36.0,36.0],"1":[1692.0,36.0],"2":[1692.0,1081.0],"3":[36.0,1081.0]}}
+ "markers":{"0":[36.0,36.0],"1":[1692.0,36.0],"2":[1692.0,1081.0],"3":[36.0,1081.0],
+            "4":[864.0,36.0],"5":[1692.0,558.5],"6":[864.0,1081.0],"7":[36.0,558.5]}}
 ```
 
-- `markers`：定位码 id → 屏幕点坐标（左上角原点），与 Mac 端 `screenCornerMap` 同源
+- `markers`：定位码 id → 屏幕点坐标（左上角原点），与 Mac 端 `screenCornerMap` 同源。
+  冗余 8 标记（ADR-007）：id0–3 四角、id4–7 四边中点（上/右/下/左），任取 ≥4 个即可建单应；
+  条目数随 Calibrator 布局自动扩展，格式本身不变
 - iPhone 端 `CameraStreamer.receiveControl/handleControl` 接收并写入 `ScreenLocalizer`
-- 收不到时（旧版 Mac）iPhone 用内置默认表（1728×1117 + 24pt 标记 + 24pt 边距）
-- 旧版 iPhone 从不读反向数据，消息滞留连接缓冲区无影响，向后兼容
+- 收不到时（旧版 Mac）iPhone 用内置默认表（1728×1117 + 24pt 标记 + 24pt 边距，同为 8 项）
+- 旧版 iPhone 从不读反向数据，消息滞留连接缓冲区无影响，向后兼容；
+  要求恰好 4 项的中间版本 iPhone 会忽略 8 项 calib 并沿用内置默认表（与 Mac 默认参数一致）
 
 同信道第二种消息——**配对二维码可见状态推送**（任何变化时广播给所有已连手机）：
 
@@ -97,16 +101,21 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 第二种消息——**手机本机识别结果上报**（2Hz，与 LOCALAIM 日志同节奏）：
 
 ```json
-{"type":"localAim","markers":4,"x":864.0,"y":558.5}
+{"type":"localAim","markers":6,"detected":[0,1,2,4,5,6],"missing":[3,7],
+ "x":864.0,"y":558.5,"detect_ms":12.3}
 ```
 
-- `markers`：本帧检出的定位码数量（0–4）；未集齐 4 角时无 `x`/`y` 字段
+- `markers`：本帧检出的定位码数量（0–8）；匹配标记 <4 时无 `x`/`y` 字段（ADR-007 后
+  不再要求 4 角集齐，≥4 个匹配即出瞄准点）
+- `detected` / `missing`：检出 / 缺失的标记 ID 数组（全集 id0–7）
 - `x`/`y`：帧中心映射的屏幕点坐标（左上角原点），与手机端 `localAim` 同源
+- `detect_ms`：本帧检测+映射耗时（Phase 0 基线测量；旧客户端无此字段，Mac 端按 0 记录）
 - 用途：Mac 端 debug 对照（两端同帧各自识别，比对输出一致性）。Mac 端 `FrameServer.onControl`
-  打印，并实时显示在标定层底部胶囊 debug 标签（未集齐时变黄提示「未识别定位码」）；
+  打印，并实时显示在标定层底部胶囊 debug 标签（检出不足时变黄提示「缺定位码」）；
   **每条上报追加一行结构化日志**到 `scenes/localaim_<会话时间>.csv`
-  （列：`timestamp,markers,x,y`，未集齐时 `x,y` 留空），供离线统计识别成功率与轨迹
-- iPhone 端 `CameraStreamer.localizeFrame` 发送；旧版 Mac 忽略未知 type，向后兼容
+  （列：`timestamp,markers,ids,x,y,detect_ms,src`，无瞄准点时 `x,y` 留空，
+  `src` 为来源通道，目前恒为 `tcp`），供离线统计识别成功率与轨迹
+- iPhone 端 `CameraStreamer.localizeFrame` 发送；旧版 Mac 忽略未知 type/未知字段，向后兼容
 
 第三种消息——**手机主动断开通知**：
 

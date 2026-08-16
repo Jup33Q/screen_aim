@@ -37,6 +37,7 @@ final class CameraStreamer: NSObject, ObservableObject {
 
     /// 本机识别（iOS 端坐标转换测试）：与 Mac 端同一套 ScreenAimCore 代码。
     /// 默认映射表对应 Mac 1728×1117 屏 + Calibrator 默认参数（24pt 标记 / 24pt 边距），
+    /// 8 项：四角 id0–3 + 四边中点 id4–7（冗余标记，ADR-007）；
     /// Mac 连上后会通过控制信道下发真实标定值覆盖（见 docs/protocol.md §6）
     let localizer = ScreenLocalizer()
     private var lastLocalizeTime: CFAbsoluteTime = 0
@@ -115,10 +116,13 @@ final class CameraStreamer: NSObject, ObservableObject {
 
     override init() {
         super.init()
-        // 默认映射表：Calibrator 默认参数（markerSize 24 / inset 24）在 1728×1117 屏上的标记中心
+        // 默认映射表：Calibrator 默认参数（markerSize 24 / inset 24）在 1728×1117 屏上的
+        // 8 个标记中心（m+s/2 = 36；W/2 = 864；H/2 = 558.5）
         localizer.screenCornerMap = [
             0: CGPoint(x: 36, y: 36), 1: CGPoint(x: 1692, y: 36),
             2: CGPoint(x: 1692, y: 1081), 3: CGPoint(x: 36, y: 1081),
+            4: CGPoint(x: 864, y: 36), 5: CGPoint(x: 1692, y: 558.5),
+            6: CGPoint(x: 864, y: 1081), 7: CGPoint(x: 36, y: 558.5),
         ]
         configureSession()
     }
@@ -472,19 +476,19 @@ extension CameraStreamer {
             self.localAim = result.aim
         }
         let detectedIds = result.markers.map { $0.id }.sorted()
-        let missingIds = [0, 1, 2, 3].filter { !detectedIds.contains($0) }
+        let missingIds = (0...7).filter { !detectedIds.contains($0) }   // 标记全集 = id0–7（ADR-007）
         localizeCounter += 1
         // 10ms 节流下每帧都识别，上报按 1/5 抽稀（≈20Hz），避免控制帧挤占视频带宽
         if localizeCounter % 5 == 0 {
             if let aim = result.aim {
                 print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d detected=%@ det=%.1fms",
-                             aim.x, aim.y, result.markers.count, 4,
+                             aim.x, aim.y, result.markers.count, 8,
                              detectedIds.map(String.init).joined(separator: ","), detectMs))
             } else if !missingIds.isEmpty {
-                print(String(format: "LOCALAIM 未集齐: detected=%@ missing=%@ det=%.1fms",
+                print(String(format: "LOCALAIM 检出不足: detected=%@ missing=%@ det=%.1fms",
                              "\(detectedIds)", "\(missingIds)", detectMs))
             }
-            // 本机识别结果上报 Mac（含未集齐 4 角的空结果 + 各标记识别状态，便于离线分析缺哪个角）
+            // 本机识别结果上报 Mac（含无瞄准点的空结果 + 各标记识别状态，便于离线分析缺哪个标记）
             var msg: [String: Any] = ["type": "localAim",
                                       "markers": result.markers.count,
                                       "detected": detectedIds,
@@ -523,7 +527,8 @@ extension CameraStreamer {
                 guard let id = Int(k), v.count == 2 else { continue }
                 map[id] = CGPoint(x: v[0], y: v[1])
             }
-            guard map.count == 4 else { return }
+            // 冗余标记模式 ≥4 项即接受（ADR-007）；旧版 Mac 只发 4 角也照常工作
+            guard map.count >= 4 else { return }
             videoQueue.async {
                 self.localizer.screenCornerMap = map
             }

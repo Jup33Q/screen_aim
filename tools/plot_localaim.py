@@ -55,8 +55,8 @@ sns.lineplot(data=df, x="t", y="ok_rate", ax=ax1, color="tab:blue", lw=1.8,
 ax2t = ax1.twinx()
 sns.scatterplot(data=df, x="t", y="markers", ax=ax2t, color="tab:orange",
                 alpha=0.35, s=14, label="每帧检出标记数")
-ax2t.set_ylim(-0.3, 4.3)
-ax2t.set_yticks(range(5))
+ax2t.set_ylim(-0.3, 8.3)
+ax2t.set_yticks(range(9))
 ax2t.set_ylabel("检出标记数")
 fail = df[~df["ok"]]
 if not fail.empty:
@@ -92,4 +92,4 @@ fig.tight_layout()
 fig.savefig(out_path, dpi=180, bbox_inches="tight")
 print(f"已保存: {out_path}")
 print(f"帧数={len(df)} 成功率={df['ok'].mean() * 100:.1f}% "
-      f"平均检出={df['markers'].mean():.2f}/4")
+      f"平均检出={df['markers'].mean():.2f}/8")

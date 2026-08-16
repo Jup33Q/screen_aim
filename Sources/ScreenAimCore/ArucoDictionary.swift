@@ -1,6 +1,6 @@
 //
 //  ArucoDictionary.swift
-//  ScreenAimCore — DICT_4X4_50 字典位图（本项目只用 id 0-3 作屏幕四角定位码）
+//  ScreenAimCore — DICT_4X4_50 字典位图（本项目用 id 0-7 作屏幕定位码：4 角 + 4 边中点，ADR-007）
 //
 //  位图约定：行优先（左上→右下）打包成 UInt16，MSB 在前；1 = 白色格
 //  （与 OpenCV generateImageMarker 的渲染约定一致）。
@@ -17,6 +17,10 @@ public enum ArucoDictionary {
         0x0F9A: 1,
         0x332D: 2,
         0x9946: 3,
+        0x549E: 4,
+        0x79CD: 5,
+        0x9E2E: 6,
+        0xC4F2: 7,
     ]
 
     /// 4×4 位图顺时针旋转 90°（旋转后 (r,c) → (c, 3-r)）

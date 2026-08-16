@@ -2,6 +2,18 @@
 
 每条 = 决策 + 原因 + 推翻它之前要满足的条件。按时间倒序。
 
+## ADR-007 冗余 8 标记 + RANSAC/最小二乘单应
+
+- **决策**：屏幕四角 + 四边中点共 8 个定位码（id0–7，Calibrator 自动布局），
+  检出与映射表匹配 ≥4 对即求解单应。Mac 端 `cv::findHomography(RANSAC, 3.0)`；
+  iPhone 纯 Swift 端 `Homography(ransacSrc:dst:)`（随机抽 4 点 DLT + 内点集
+  Accelerate dsyev_ 最小二乘精化）。
+- **原因**：旧方案要求 4 角恰好集齐，缺一即整帧无输出，单帧掉检/手指遮挡是常态；
+  冗余标记把"帧级命中率"变成"系统级可用率"，对本场景收益大于换字典
+  （docs/positioning-optimization-plan.md §1.2）。
+- **推翻条件**：8 标记对屏幕 UI 遮挡被确认不可接受，或 Vision/DataMatrix 通道
+  切主后标记布局整体重设计。
+
 ## ADR-006 太阳按钮用单一 DragGesture 状态机，不用 Tap/LongPress 组合
 
 - **决策**：落指起计时 0.35s，按住即激活亮度条，竖拖调节，短按收起；全部在一个

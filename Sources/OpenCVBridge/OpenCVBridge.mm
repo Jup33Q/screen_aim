@@ -8,6 +8,7 @@
 #import <opencv2/opencv.hpp>
 #import <opencv2/imgproc.hpp>
 #import <opencv2/geometry/2d.hpp>
+#import <opencv2/geometry/3d.hpp>   // OpenCV 5 起 findHomography / RANSAC 枚举在这个头里
 #import <opencv2/objdetect/aruco_detector.hpp>
 
 @implementation ArucoMarker
@@ -68,14 +69,18 @@
 
 + (BOOL)generateTestSceneToFile:(NSString*)path error:(NSError* _Nullable*)error {
     auto dict = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50);
-    // 1000x800 白底画布，四角内侧 100px 处各放一个 200px 标记
+    // 1000x800 白底画布，四角 + 四边中点共 8 个标记（id 0-7）——冗余 8 标记自检场景（ADR-007）。
+    // WARNING: 标记边长只能 100px——200px 时同列标记黑边相贴合并成一个大连通域，
+    // 静区被破坏后任何检测器都解不出（ArUco 标记之间必须留白）
     cv::Mat scene(800, 1000, CV_8UC1, cv::Scalar(255));
-    const int inset = 100, side = 200;
-    const cv::Point origins[4] = {
+    const int inset = 50, side = 100;
+    const cv::Point origins[8] = {
         {inset, inset}, {1000 - inset - side, inset},
-        {1000 - inset - side, 800 - inset - side}, {inset, 800 - inset - side}
+        {1000 - inset - side, 800 - inset - side}, {inset, 800 - inset - side},
+        {500 - side / 2, inset}, {1000 - inset - side, 400 - side / 2},
+        {500 - side / 2, 800 - inset - side}, {inset, 400 - side / 2}
     };
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
         cv::Mat marker;
         cv::aruco::generateImageMarker(dict, i, side, marker, 1);
         cv::Mat roi = scene(cv::Rect(origins[i], cv::Size(side, side)));
@@ -140,6 +145,31 @@
     for (NSValue* v in dst) { CGPoint p = v.pointValue; d.emplace_back(p.x, p.y); }
 
     cv::Mat H = cv::getPerspectiveTransform(s, d);
+    std::vector<cv::Point2f> in{cv::Point2f((float)point.x, (float)point.y)}, out;
+    cv::perspectiveTransform(in, out, H);
+    if (ok) *ok = true;
+    return CGPointMake(out[0].x, out[0].y);
+}
+
++ (CGPoint)mapPointRANSAC:(CGPoint)point
+                srcPoints:(NSArray<NSValue*>*)src
+                dstPoints:(NSArray<NSValue*>*)dst
+                  success:(BOOL* _Nullable)ok {
+    if (src.count < 4 || dst.count < 4) {
+        if (ok) *ok = false;
+        return CGPointZero;
+    }
+    std::vector<cv::Point2f> s, d;
+    for (NSValue* v in src) { CGPoint p = v.pointValue; s.emplace_back(p.x, p.y); }
+    for (NSValue* v in dst) { CGPoint p = v.pointValue; d.emplace_back(p.x, p.y); }
+
+    // RANSAC 阈值 3.0（dst 单位 = 屏幕 pt）：剔除掉检错位点，内点上最小二乘重解
+    cv::Mat inlierMask;
+    cv::Mat H = cv::findHomography(s, d, cv::RANSAC, 3.0, inlierMask);
+    if (H.empty() || cv::countNonZero(inlierMask) < 4) {
+        if (ok) *ok = false;
+        return CGPointZero;
+    }
     std::vector<cv::Point2f> in{cv::Point2f((float)point.x, (float)point.y)}, out;
     cv::perspectiveTransform(in, out, H);
     if (ok) *ok = true;
