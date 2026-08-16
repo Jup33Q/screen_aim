@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		21413713EAC1C6591477A25E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 935833E6F836BDAF47F01ED6 /* ContentView.swift */; };
+		490D781163D39227149BE8F2 /* CaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A94852DF43A456C9363C28D7 /* CaptureRecorder.swift */; };
 		4B5E031A124025191EE682FF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 570CDB1B79715F6D759EFE6A /* Assets.xcassets */; };
 		4CFCCB77CF72136A2046BCCC /* AimPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E499E972D884E3FC90FB661A /* AimPhoneApp.swift */; };
 		A1A173954DDAB47019D8530B /* MarkerDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */; };
@@ -26,6 +27,7 @@
 		671158DC7200C25D7D0D0139 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		830EBE3C6A616155318C105A /* GimbalManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GimbalManager.swift; sourceTree = "<group>"; };
 		935833E6F836BDAF47F01ED6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A94852DF43A456C9363C28D7 /* CaptureRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRecorder.swift; sourceTree = "<group>"; };
 		AECA2E6D05700778951A4826 /* Homography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Homography.swift; sourceTree = "<group>"; };
 		E499E972D884E3FC90FB661A /* AimPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AimPhoneApp.swift; sourceTree = "<group>"; };
 		E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenLocalizer.swift; sourceTree = "<group>"; };
@@ -71,6 +73,7 @@
 				E499E972D884E3FC90FB661A /* AimPhoneApp.swift */,
 				570CDB1B79715F6D759EFE6A /* Assets.xcassets */,
 				F801D5BF510A50654CB415E0 /* CameraStreamer.swift */,
+				A94852DF43A456C9363C28D7 /* CaptureRecorder.swift */,
 				935833E6F836BDAF47F01ED6 /* ContentView.swift */,
 				830EBE3C6A616155318C105A /* GimbalManager.swift */,
 				671158DC7200C25D7D0D0139 /* Info.plist */,
@@ -152,6 +155,7 @@
 				4CFCCB77CF72136A2046BCCC /* AimPhoneApp.swift in Sources */,
 				CF0C190E4FB427B2799F2E0A /* ArucoDictionary.swift in Sources */,
 				ED3B37E721CC705253961C50 /* CameraStreamer.swift in Sources */,
+				490D781163D39227149BE8F2 /* CaptureRecorder.swift in Sources */,
 				21413713EAC1C6591477A25E /* ContentView.swift in Sources */,
 				E4AF9E8E8EA6ADEB992E7FAF /* GimbalManager.swift in Sources */,
 				F898C1AE86A0AE9866D63EAC /* Homography.swift in Sources */,

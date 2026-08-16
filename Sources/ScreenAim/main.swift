@@ -604,6 +604,142 @@ final class FrameServer {
     }
 }
 
+// MARK: - 数据采集接收（protocol.md §10）
+/// 采集回传服务：与帧服务同机不同端口（servePort+1）。iPhone 录完一批帧后主动连接，
+/// 流式上传记录：`[4B 大端 jsonLen][json][4B 大端 binLen][bin]`，session/end 记录 binLen=0。
+/// 落盘 scenes/capture_<label>_<时间戳>/（frames/NNNN.png + meta.jsonl + session.json），
+/// 供 `ScreenAim --replay` 离线回放调参。
+final class CaptureServer {
+    /// 当前采集会话的 Mac 侧元信息（label/标记参数/映射表，写 session.json 用）
+    var sessionInfo: (() -> [String: Any])?
+    /// 一次上传完成（或中途断连兜底收尾）回调，参数为落盘目录；主线程派发
+    var onCaptureDone: ((URL) -> Void)?
+    private let port: UInt16
+    private var listener: NWListener?
+
+    init(port: UInt16) { self.port = port }
+
+    func start() throws {
+        guard let p = NWEndpoint.Port(rawValue: port) else {
+            throw NSError(domain: "ScreenAim", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "非法端口 \(port)"])
+        }
+        let l = try NWListener(using: .tcp, on: p)
+        l.newConnectionHandler = { [weak self] conn in
+            guard let self else { return }
+            print("采集上传连接: \(conn.endpoint)")
+            conn.start(queue: DispatchQueue(label: "screenaim.ingest"))
+            self.readRecord(conn, IngestSession())
+        }
+        l.start(queue: DispatchQueue(label: "screenaim.ingest.listen"))
+        listener = l
+        print("采集回传服务已启动，端口 \(port)")
+    }
+
+    /// 单个上传连接的进行态
+    private final class IngestSession {
+        var dir: URL?
+        var metaHandle: FileHandle?
+        var frames = 0
+        var bytes: Int64 = 0
+        var phoneSession: [String: Any] = [:]
+        var finished = false
+    }
+
+    /// 读满 n 字节；失败/断流回调 nil
+    private func readExact(_ conn: NWConnection, _ n: Int,
+                           completion: @escaping (Data?) -> Void) {
+        if n == 0 { completion(Data()); return }
+        conn.receive(minimumIncompleteLength: n, maximumLength: n) { data, _, _, error in
+            guard let data, data.count == n, error == nil else { completion(nil); return }
+            completion(data)
+        }
+    }
+
+    private func readRecord(_ conn: NWConnection, _ s: IngestSession) {
+        readExact(conn, 4) { [weak self] hdr in
+            guard let self, let hdr else { self?.finish(s); conn.cancel(); return }
+            let jsonLen = Int(hdr.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+            guard jsonLen > 0, jsonLen < 1_000_000 else { self.finish(s); conn.cancel(); return }
+            self.readExact(conn, jsonLen) { json in
+                guard let json,
+                      let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any]
+                else { self.finish(s); conn.cancel(); return }
+                self.readExact(conn, 4) { blHdr in
+                    guard let blHdr else { self.finish(s); conn.cancel(); return }
+                    let binLen = Int(blHdr.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+                    guard binLen < 16_000_000 else { self.finish(s); conn.cancel(); return }
+                    self.readExact(conn, binLen) { bin in
+                        guard let bin else { self.finish(s); conn.cancel(); return }
+                        self.processRecord(obj, bin: bin, session: s)
+                        if (obj["kind"] as? String) == "end" {
+                            self.finish(s)
+                            conn.cancel()
+                        } else {
+                            self.readRecord(conn, s)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func processRecord(_ obj: [String: Any], bin: Data, session s: IngestSession) {
+        switch obj["kind"] as? String {
+        case "session":
+            s.phoneSession = obj
+            let info = sessionInfo?() ?? [:]
+            let rawLabel = (info["label"] as? String ?? "")
+                .filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+            let label = rawLabel.isEmpty ? "session" : rawLabel
+            let stamp = ISO8601DateFormatter().string(from: Date())
+                .replacingOccurrences(of: ":", with: "-")
+            let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("scenes/capture_\(label)_\(stamp)", isDirectory: true)
+            try? FileManager.default.createDirectory(
+                at: dir.appendingPathComponent("frames", isDirectory: true),
+                withIntermediateDirectories: true)
+            let metaURL = dir.appendingPathComponent("meta.jsonl")
+            FileManager.default.createFile(atPath: metaURL.path, contents: nil)
+            s.metaHandle = FileHandle(forWritingAtPath: metaURL.path)
+            s.dir = dir
+        case "frame":
+            guard let dir = s.dir, let seq = obj["seq"] as? Int else { return }
+            try? bin.write(to: dir.appendingPathComponent(
+                String(format: "frames/%04d.png", seq)))
+            s.metaHandle?.write(jsonLine(obj))
+            s.frames += 1
+            s.bytes += Int64(bin.count)
+        default:
+            break
+        }
+    }
+
+    private func jsonLine(_ obj: [String: Any]) -> Data {
+        guard let d = try? JSONSerialization.data(withJSONObject: obj) else { return Data() }
+        return d + Data([0x0A])
+    }
+
+    /// 收尾：合并双端元信息写 session.json，打印摘要，通知 UI
+    private func finish(_ s: IngestSession) {
+        guard !s.finished, s.dir != nil else { return }
+        s.finished = true
+        s.metaHandle?.closeFile()
+        guard let dir = s.dir else { return }
+        var session = sessionInfo?() ?? [:]
+        session["device"] = s.phoneSession["device"] ?? "unknown"
+        session["os"] = s.phoneSession["os"] ?? "unknown"
+        session["frames"] = s.frames
+        session["bytes"] = s.bytes
+        if let d = try? JSONSerialization.data(withJSONObject: session, options: [.prettyPrinted, .sortedKeys]) {
+            try? d.write(to: dir.appendingPathComponent("session.json"))
+        }
+        print(String(format: "采集落盘: %@（%d 帧，%.1fMB）",
+                     dir.path, s.frames, Double(s.bytes) / 1e6))
+        DispatchQueue.main.async { self.onCaptureDone?(dir) }
+    }
+}
+
 // MARK: - 透明悬浮标定层
 /// 全屏透明、点击穿透的悬浮窗口：四角 + 四边中点共 8 个悬浮 ArUco 标记（ADR-007）
 /// +（推流模式）中央配对二维码。
@@ -623,6 +759,10 @@ final class Calibrator: NSObject {
     /// 立即按当前 IP 重新生成配对二维码（IP 看守计时器与手机断开通知共用）
     var refreshQRNow: (() -> Void)?
     var qrButton: ActionButton?  // Mac 端配对码开关按钮（悬浮 NSPanel 上）
+    /// 数据采集状态（protocol.md §10）：录制中按钮变红，CaptureServer 收完自动复位
+    var capturing = false
+    var captureButton: ActionButton?
+    var captureLabel = ""
     var currentPayload = ""
     var debugLabel: NSTextField?  // 手机端本机识别结果（localAim）的悬浮 debug 文本
     var centers: [CGPoint] = []        // 当前 8 个标记中心的屏幕点坐标（左上角原点）
@@ -867,12 +1007,12 @@ final class Calibrator: NSObject {
                     setQRVisible(false)   // 配对成功，隐藏二维码并广播状态
                 }
 
-                // Mac 端配对码开关 + 退出应用按钮 + 定位码大小滑杆：主覆盖层点击穿透，
+                // Mac 端配对码开关 + 退出应用按钮 + 采集按钮 + 定位码大小滑杆：主覆盖层点击穿透，
                 // 所以单独用一个可点击的悬浮 NSPanel（屏幕顶部居中）
-                let qrBtnW: CGFloat = 52, closeBtnW: CGFloat = 52, btnGap: CGFloat = 8
+                let qrBtnW: CGFloat = 52, closeBtnW: CGFloat = 52, recBtnW: CGFloat = 52, btnGap: CGFloat = 8
                 let sliderW: CGFloat = 210   // 滑杆胶囊（滑杆 + 数值标签）
                 let panelH: CGFloat = 44
-                let panelW = qrBtnW + closeBtnW + btnGap * 2 + sliderW
+                let panelW = qrBtnW + closeBtnW + recBtnW + btnGap * 3 + sliderW
                 // 避开刘海/菜单栏安全区：面板贴在安全区下沿再留 8pt
                 let safeTop = screen.safeAreaInsets.top
                 let btnPanel = NSPanel(contentRect: NSRect(x: W / 2 - panelW / 2,
@@ -922,10 +1062,31 @@ final class Calibrator: NSObject {
                 closeBtn.onClick = {
                     NSApp.terminate(nil)
                 }
+                // 数据采集按钮（protocol.md §10）：点击下发 captureStart（10s@5fps），
+                // 录制中变红，再点提前停止；CaptureServer 收完上传后自动复位颜色
+                let recBg = makeBtnBg(x: qrBtnW + closeBtnW + btnGap * 2, w: recBtnW)
+                let recBtn = makeSymbolButton(symbol: "record.circle", tint: .white,
+                                              tooltip: "采集 10 秒识别数据（手机回传，落盘 scenes/）",
+                                              bg: recBg)
+                recBtn.onClick = { [weak self] in
+                    guard let self else { return }
+                    if self.capturing {
+                        server.sendControl(["type": "captureStop"])
+                    } else {
+                        // label 只带 Mac 侧已知的标记参数；距离/运动语义由操作者事后改目录名补充
+                        self.captureLabel = String(format: "m%d_i%d",
+                                                   Int(self.markerSize), Int(self.inset))
+                        server.sendControl(["type": "captureStart", "seconds": 10, "fps": 5,
+                                            "label": self.captureLabel])
+                    }
+                    self.capturing.toggle()
+                    recBtn.contentTintColor = self.capturing ? .systemRed : .white
+                }
+                captureButton = recBtn
                 // 定位码大小滑杆：拖动实时重建四角标记、更新 Mac 端映射表并把新标定表广播给已连手机。
                 // 触控板触觉反馈：每跨 1pt 一次 .generic 轻敲；吸附档位（24/48/64/96）命中时一次
                 // .alignment 对位震感（不支持 Force Touch 的硬件系统自动忽略）
-                let sliderBg = makeBtnBg(x: qrBtnW + closeBtnW + btnGap * 2, w: sliderW)
+                let sliderBg = makeBtnBg(x: qrBtnW + closeBtnW + recBtnW + btnGap * 3, w: sliderW)
                 let slider = ActionSlider(frame: NSRect(x: 10, y: 8, width: 132, height: 28))
                 slider.minValue = 16
                 slider.maxValue = 96
@@ -1044,6 +1205,27 @@ final class Calibrator: NSObject {
                 }
                 try server.start()
                 objc_setAssociatedObject(win, "server", server, .OBJC_ASSOCIATION_RETAIN)
+                // 采集回传服务（protocol.md §10）：与帧服务同机，端口 +1
+                let captureServer = CaptureServer(port: port + 1)
+                captureServer.sessionInfo = { [weak self, sampler] in
+                    guard let self else { return [:] }
+                    var map: [String: [Double]] = [:]
+                    for (k, v) in sampler.screenCornerMap {
+                        map["\(k)"] = [Double(v.x), Double(v.y)]
+                    }
+                    return ["label": self.captureLabel,
+                            "markerSize": Double(self.markerSize),
+                            "inset": Double(self.inset),
+                            "screenW": Double(self.screenW), "screenH": Double(self.screenH),
+                            "screenCornerMap": map]
+                }
+                captureServer.onCaptureDone = { [weak self] _ in
+                    self?.capturing = false
+                    self?.captureButton?.contentTintColor = .white
+                }
+                try captureServer.start()
+                objc_setAssociatedObject(win, "captureServer", captureServer,
+                                         .OBJC_ASSOCIATION_RETAIN)
             } catch {
                 // 同步 throw（如非法端口）：同样不允许带病运行
                 fputs("帧服务启动失败: \(error.localizedDescription)\n", stderr)

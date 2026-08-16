@@ -12,6 +12,7 @@ import CoreImage
 import Network
 import Combine
 import Vision
+import UIKit   // UIDevice（采集 session 记录系统版本）
 
 /// 相机可用性状态：驱动权限拒绝 / 配置失败的兜底 UI
 enum CameraAvailability: Equatable {
@@ -55,6 +56,10 @@ final class CameraStreamer: NSObject, ObservableObject {
     private var frameCounter = 0
     private var activeDevice: AVCaptureDevice?
     var frameInterval: CFAbsoluteTime = 1.0 / 15.0   // 15fps 足够瞄准用途
+    /// 数据采集（protocol.md §10）：Mac 控制帧触发，录完上传到 Mac:port+1
+    private let captureRecorder = CaptureRecorder()
+    /// 当前连接的解析后地址（Bonjour 连接在 ready 后从 currentPath 取），采集上传用
+    private var connectedHostPort: (NWEndpoint.Host, NWEndpoint.Port)?
 
     /// 实时亮度调节：v ∈ 0...1 映射到 ISO [minISO, minISO × 10]
     func setBrightness(_ v: Float) {
@@ -243,6 +248,10 @@ final class CameraStreamer: NSObject, ObservableObject {
                     self.connectionError = false
                     self.streamPaused = false   // 新连接复位推流暂停，避免"连上但没画面"
                     self.statusText = "已连接 \(label)"
+                    // 记录解析后的对端地址（Bonjour 服务端点没有裸 IP，采集上传要按 IP 直连 port+1）
+                    if case .hostPort(let host, let port) = conn.currentPath?.remoteEndpoint {
+                        self.connectedHostPort = (host, port)
+                    }
                     // 连上后停止 Bonjour 浏览
                     self.browser?.cancel()
                     self.browser = nil
@@ -499,6 +508,97 @@ extension CameraStreamer {
             if let aim = result.aim { msg["x"] = aim.x; msg["y"] = aim.y }
             sendControl(msg)
         }
+        // 数据采集（protocol.md §10）：录制中则抽帧落盘；到点自动 finish 并上传。
+        // 注意此时 pb 仍持锁（本函数 defer 解锁），PNG 编码可以直接读
+        captureRecorder.record(pb: pb, pts: timestamp, result: result, detectMs: detectMs)
+        { [weak self] dir, n in
+            self?.finishCaptureAndUpload(dir: dir, frames: n)
+        }
+        if captureRecorder.isRecording, captureRecorder.frameCount > 0 {
+            let pct = Int(captureRecorder.progress * 100)
+            DispatchQueue.main.async { [weak self] in
+                self?.statusText = "采集中 \(pct)%（\(self?.captureRecorder.frameCount ?? 0) 帧）"
+            }
+        }
+    }
+
+    /// 结束采集并上传到 Mac:port+1（captureStop 控制帧与到点自动停止共用，videoQueue 上调用）
+    private func finishCaptureAndUpload(dir: URL, frames: Int) {
+        DispatchQueue.main.async { self.statusText = "采集完成（\(frames) 帧），上传中…" }
+        guard let (host, port) = connectedHostPort,
+              let upPort = NWEndpoint.Port(rawValue: port.rawValue + 1) else {
+            DispatchQueue.main.async { self.statusText = "采集上传失败：无对端地址" }
+            return
+        }
+        let conn = NWConnection(to: .hostPort(host: host, port: upPort), using: .tcp)
+        conn.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                self?.sendCaptureRecords(conn: conn, dir: dir, total: frames)
+            case .failed(let e):
+                DispatchQueue.main.async { self?.statusText = "采集上传失败: \(e.localizedDescription)" }
+            default:
+                break
+            }
+        }
+        conn.start(queue: videoQueue)
+    }
+
+    /// 逐条流式发送采集记录（[4B jsonLen][json][4B binLen][bin]，contentProcessed 串行背压）。
+    /// 顺序：session 记录 → 每帧一条（meta.jsonl 行 + PNG）→ end 记录（finalMessage 收尾）
+    private func sendCaptureRecords(conn: NWConnection, dir: URL, total: Int) {
+        var uts = utsname()
+        uname(&uts)
+        let model = withUnsafeBytes(of: &uts.machine) { ptr in
+            String(cString: ptr.baseAddress!.assumingMemoryBound(to: CChar.self))
+        }
+        let session: [String: Any] = ["kind": "session", "device": model,
+                                      "os": UIDevice.current.systemVersion]
+        guard let metaRaw = FileManager.default.contents(
+            atPath: dir.appendingPathComponent("meta.jsonl").path),
+            let metaText = String(data: metaRaw, encoding: .utf8) else { conn.cancel(); return }
+        let lines = metaText.split(separator: "\n").map(String.init)
+
+        // records 惰性求值：session/end 无二进制体（binLen=0）
+        func recordData(_ json: Data, bin: Data?) -> Data {
+            var jl = UInt32(json.count).bigEndian
+            var bl = UInt32(bin?.count ?? 0).bigEndian
+            var out = withUnsafeBytes(of: &jl) { Data($0) }
+            out.append(json)
+            out.append(withUnsafeBytes(of: &bl) { Data($0) })
+            if let bin { out.append(bin) }
+            return out
+        }
+        func send(_ data: Data, then: @escaping () -> Void) {
+            conn.send(content: data, completion: .contentProcessed { _ in then() })
+        }
+        func sendFrame(_ i: Int) {
+            guard i < lines.count else {
+                let end: [String: Any] = ["kind": "end", "frames": total,
+                                          "peakRotRate": captureRecorder.peakRotRate]
+                send(recordData(try! JSONSerialization.data(withJSONObject: end), bin: nil)) {
+                    conn.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                              completion: .contentProcessed { _ in
+                        conn.cancel()
+                        // 上传完成后清理临时目录（35–75MB/段，不留垃圾）
+                        try? FileManager.default.removeItem(at: dir)
+                        DispatchQueue.main.async { self.statusText = "采集已上传（\(total) 帧）" }
+                    })
+                }
+                return
+            }
+            let pngPath = dir.appendingPathComponent(
+                String(format: "frames/%04d.png", i + 1)).path
+            guard let json = lines[i].data(using: .utf8),
+                  let bin = FileManager.default.contents(atPath: pngPath) else {
+                sendFrame(i + 1)   // 单帧缺失不阻塞整体上传
+                return
+            }
+            send(recordData(json, bin: bin)) { sendFrame(i + 1) }
+        }
+        send(recordData(try! JSONSerialization.data(withJSONObject: session), bin: nil)) {
+            sendFrame(0)
+        }
     }
 
     /// 控制信道接收循环：Mac → iPhone，[4字节大端长度][JSON]，目前只有 calib 一种
@@ -542,6 +642,23 @@ extension CameraStreamer {
             // Mac 配对二维码可见状态推送（按钮高亮跟随真实状态）
             DispatchQueue.main.async {
                 self.pairingQRVisibleOnMac = obj["visible"] as? Bool ?? false
+            }
+        case "captureStart":
+            // 数据采集触发（protocol.md §10）：Mac 标定层按钮下发，录制走 videoQueue
+            let seconds = obj["seconds"] as? Int ?? 10
+            let fps = obj["fps"] as? Int ?? 5
+            videoQueue.async {
+                if let err = self.captureRecorder.start(
+                    seconds: seconds, fps: fps,
+                    deviceProvider: { [weak self] in self?.activeDevice }) {
+                    DispatchQueue.main.async { self.statusText = err }
+                }
+            }
+        case "captureStop":
+            videoQueue.async {
+                if let (dir, n) = self.captureRecorder.finish() {
+                    self.finishCaptureAndUpload(dir: dir, frames: n)
+                }
             }
         default:
             break

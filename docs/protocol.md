@@ -146,3 +146,38 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 - 两种消息都要求 Mac 端在 系统设置 > 隐私与安全性 > 辅助功能 中授权
   （否则 CGEvent 被系统静默丢弃）
 - 旧版 Mac 忽略未知 type，仅表现为触控层无实际效果，向后兼容
+
+## 9. （保留）
+
+按定位优化方案 §7.7 预留给 Phase 3 UDP 结果通道。
+
+## 10. 数据采集回传（识别算法优化用）
+
+真机无损帧采集：Mac 触发 → iPhone 录制 → 第二条 TCP 连接回传 → Mac 落盘回放。
+
+**触发/停止**（Mac → iPhone，§6 控制信道，只加不删）：
+
+```json
+{"type":"captureStart","seconds":10,"fps":5,"label":"m24_i24"}
+{"type":"captureStop"}
+```
+
+- Mac 标定层面板的 record 按钮发送（`Calibrator.captureButton`）；旧版 iPhone 忽略未知 type
+- iPhone 端 `CaptureRecorder` 在 `aimphone.capture` 队列逐帧抽录：BGRA → **无损 PNG**
+  （禁止重编码，回放须像素级复现检测器输入）+ `meta.jsonl` 逐帧元数据
+  （seq/PTS/ISO/曝光/变焦/角速度/线上检测结果 ids+centers/aim/detect_ms）
+- 到时自动停止或收到 captureStop；预估体积 >200MB 或磁盘不足会拒绝启动（状态文案提示）
+
+**回传**（iPhone → Mac，新 TCP 连接，端口 = 帧服务端口 + 1）：
+
+```
+[4B 大端 jsonLen][json][4B 大端 binLen][bin]   × N 条记录
+```
+
+- `kind=session`（binLen=0）：设备型号/系统版本
+- `kind=frame`：json 为一行帧元数据，bin 为对应 PNG
+- `kind=end`（binLen=0）：帧数 + 角速度峰值；随后 finalMessage 优雅关闭
+- Mac 端 `CaptureServer` 落盘 `scenes/capture_<label>_<时间戳>/`
+  （frames/NNNN.png + meta.jsonl + session.json〔双端元信息合并〕），
+  中途断连按已收帧数兜底收尾
+- 回放：`ScreenAim --replay <目录>`（离线重跑检测器 + OpenCV 参照，见 development.md）
