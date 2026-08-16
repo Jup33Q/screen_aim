@@ -1562,6 +1562,111 @@ if CommandLine.arguments.contains("--swift-seq") {
     exit(0)
 }
 
+if let ri = CommandLine.arguments.firstIndex(of: "--replay"),
+   CommandLine.arguments.count > ri + 1 {
+    setbuf(stdout, nil)
+    // 采集回放（protocol.md §10）：逐帧重跑纯 Swift 检测器 + OpenCV 参照，
+    // 与录制时的线上结果对比。用于真机数据上的离线调参（参数覆盖见下）与 A/B。
+    let dir = CommandLine.arguments[ri + 1]
+    func optD(_ name: String) -> Double? {
+        guard let i = CommandLine.arguments.firstIndex(of: name),
+              CommandLine.arguments.count > i + 1 else { return nil }
+        return Double(CommandLine.arguments[i + 1])
+    }
+    let localizer = ScreenLocalizer()
+    localizer.aimFilterEnabled = false   // 回放测原始检测质量；滤波效果走 --swift-seq
+    if let v = optD("--min-cell-gap") { localizer.detector.minCellGap = v }
+    if let v = optD("--thresh-c") { localizer.detector.thresholdC = v }
+    if let v = optD("--window"), let iv = Int(exactly: v) { localizer.detector.windowSize = iv }
+    if CommandLine.arguments.contains("--no-refine") { localizer.detector.subpixelRefine = false }
+    // 映射表来自 session.json（采集时 Mac 侧真实标定）；缺失则只出检出率，不出 aim
+    if let d = FileManager.default.contents(atPath: dir + "/session.json"),
+       let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+       let m = obj["screenCornerMap"] as? [String: [Double]] {
+        localizer.screenCornerMap = m.reduce(into: [:]) {
+            guard let id = Int($1.key), $1.value.count == 2 else { return }
+            $0[id] = CGPoint(x: $1.value[0], y: $1.value[1])
+        }
+    }
+    guard let metaRaw = FileManager.default.contents(atPath: dir + "/meta.jsonl"),
+          let metaText = String(data: metaRaw, encoding: .utf8) else {
+        fputs("回放失败: \(dir)/meta.jsonl 不存在\n", stderr); exit(1)
+    }
+    let bridge = OpenCVBridge()
+    var frames = 0
+    var onlineHit: [Int: Int] = [:], offHit: [Int: Int] = [:], cvHit: [Int: Int] = [:]
+    var centerErrs: [Double] = []
+    var aims: [CGPoint] = []
+    var csv = ["frame,id,online,offline,cv,offline_cx,offline_cy,cv_cx,cv_cy,center_err_px"]
+    for line in metaText.split(separator: "\n") {
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              obj["kind"] as? String == "frame",
+              let seq = obj["seq"] as? Int else { continue }
+        let png = String(format: "%@/frames/%04d.png", dir, seq)
+        guard let (data, w, h) = loadBGRA(from: png) else { continue }
+        frames += 1
+        let result = data.withUnsafeBytes {
+            localizer.localize(bgra: $0.baseAddress!, width: w, height: h, bytesPerRow: w * 4)
+        }
+        let cv = data.withUnsafeBytes {
+            bridge.detectMarkers(inBGRABuffer: $0.baseAddress!, width: Int32(w), height: Int32(h))
+        }
+        let onlineIDs: Set<Int> = Set(((obj["markers"] as? [[String: Any]]) ?? [])
+            .compactMap { $0["id"] as? Int })
+        let offMap = result.markers.reduce(into: [Int: CGPoint]()) { $0[$1.id] = $1.center }
+        let cvMap = cv.reduce(into: [Int: CGPoint]()) { $0[Int($1.markerId)] = $1.center }
+        if let aim = result.aim { aims.append(aim) }
+        for id in 0...7 {
+            let on = onlineIDs.contains(id), off = offMap[id] != nil, c = cvMap[id] != nil
+            if on { onlineHit[id, default: 0] += 1 }
+            if off { offHit[id, default: 0] += 1 }
+            if c { cvHit[id, default: 0] += 1 }
+            var err = ""
+            if let o = offMap[id], let v = cvMap[id] {
+                let e = hypot(o.x - v.x, o.y - v.y)
+                centerErrs.append(e)
+                err = String(format: "%.2f", e)
+            }
+            csv.append(String(format: "%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%@",
+                              seq, id, on ? 1 : 0, off ? 1 : 0, c ? 1 : 0,
+                              offMap[id]?.x ?? 0, offMap[id]?.y ?? 0,
+                              cvMap[id]?.x ?? 0, cvMap[id]?.y ?? 0, err))
+        }
+    }
+    // 汇总：命中率（线上/离线/参照）、中心误差（离线 vs OpenCV 参照）、aim σ、拒绝直方图
+    print("== 回放汇总（\(dir)）==")
+    print("帧数: \(frames)")
+    print("id | 线上 | 离线 | OpenCV")
+    for id in 0...7 {
+        print(String(format: "%2d | %3.0f%% | %3.0f%% | %3.0f%%", id,
+                     Double(onlineHit[id] ?? 0) / Double(max(frames, 1)) * 100,
+                     Double(offHit[id] ?? 0) / Double(max(frames, 1)) * 100,
+                     Double(cvHit[id] ?? 0) / Double(max(frames, 1)) * 100))
+    }
+    if !centerErrs.isEmpty {
+        let sorted = centerErrs.sorted()
+        print(String(format: "中心误差（离线 vs OpenCV）: p50=%.2fpx p95=%.2fpx max=%.2fpx（n=%d）",
+                     sorted[sorted.count / 2], sorted[Int(Double(sorted.count) * 0.95)],
+                     sorted.last!, sorted.count))
+    }
+    if aims.count > 1 {
+        let n = Double(aims.count)
+        let mx = aims.map(\.x).reduce(0, +) / n, my = aims.map(\.y).reduce(0, +) / n
+        let sx = sqrt(aims.map { ($0.x - mx) * ($0.x - mx) }.reduce(0, +) / (n - 1))
+        let sy = sqrt(aims.map { ($0.y - my) * ($0.y - my) }.reduce(0, +) / (n - 1))
+        print(String(format: "aim σ（未滤波，n=%d）: σx=%.3fpt σy=%.3fpt σr=%.3fpt",
+                     aims.count, sx, sy, hypot(sx, sy)))
+    }
+    let hist = localizer.detector.rejectHistogram.sorted { $0.value > $1.value }
+    if !hist.isEmpty {
+        print("拒绝直方图: " + hist.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
+    }
+    try? (csv.joined(separator: "\n") + "\n")
+        .write(toFile: dir + "/replay.csv", atomically: true, encoding: .utf8)
+    print("replay.csv 已写入 \(dir)")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--make-markers") {
     let dir = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "./markers"
     do {

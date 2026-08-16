@@ -38,6 +38,17 @@ DockKit 行为**模拟器无法验证**；模拟器构建自动降级为空操�
 - 模拟推流 60/60 帧全检出；24pt 标记抖动 σ ≈ 0.05pt；20pt 以下检不出
 - 标记必须带白色静区底卡（Calibrator 已内置 8pt 白卡）
 
+## 真机数据采集（识别算法调参用，protocol.md §10）
+
+1. `swift run ScreenAim --calibrate --serve 9100`，手机连接（新包）
+2. 摆好场景（距离/标记大小），点顶部面板的 ● 按钮采 10s（再点提前停），
+   落盘 `scenes/capture_<label>_<时间戳>/`；距离/运动语义请事后补充进目录名
+3. 回放调参：`swift run ScreenAim --replay scenes/capture_xxx`
+   （可加 `--min-cell-gap/--thresh-c/--window/--no-refine` 覆盖检测器参数做 A/B），
+   输出三方命中率（线上/离线/OpenCV 参照）、中心误差、aim σ、拒绝直方图、replay.csv
+4. 场景矩阵：3 距离（屏幕占画面 ~90%/65%/40%）× 标记 {24,20,16pt} ×
+   {云台静止, 手持微抖, 快速横扫} + 遮挡 2 段；每段 10s@5fps（≈50MB/段）
+
 ## 排错速查
 
 | 症状 | 先看 |

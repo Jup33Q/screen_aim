@@ -37,9 +37,21 @@ public final class ArucoDetector {
     public var maxQuadAreaRatio = 0.5     // 四边形面积占整帧上限
     public var outerRingMargin: Double = 10  // 外圈亮度必须超过格网阈值这么多
     public var minCellGap: Double = 25    // 36 格最小黑白间隙（模糊帧上白格可能只剩 ~180）
+    public var subpixelRefine = true      // 亚像素角点精化开关（Phase 1.2；--replay A/B 用）
     public var debugLog = false           // 打印候选拒绝原因（排错用）
+    /// 拒绝原因直方图（--replay 汇总用；每次拒绝一次字典递增，成本可忽略）
+    public private(set) var rejectHistogram: [String: Int] = [:]
     public private(set) var lastDark: [UInt8] = []   // debugLog 时保留最近一帧的二值图
     public private(set) var lastSize: (w: Int, h: Int) = (0, 0)
+
+    /// 清空拒绝直方图（每个回放会话开始前调用）
+    public func resetRejectHistogram() { rejectHistogram.removeAll() }
+
+    /// 统一拒绝出口：计数后返回 nil
+    private func reject(_ key: String) -> DetectedMarker? {
+        rejectHistogram[key, default: 0] += 1
+        return nil
+    }
 
     private var dlogPrefix = ""
     @inline(__always)
@@ -263,7 +275,7 @@ public final class ArucoDetector {
         }
         if c.touchesBorder {
             dlog("touchesBorder count=\(c.count) bbox=(\(Int(c.minDiff.x)),\(Int(c.minSum.y)))-(\(Int(c.maxDiff.x)),\(Int(c.maxSum.y)))")
-            return nil
+            return reject("touchesBorder")
         }
 
         // 极值点 → 四顶点（凸四边形的 ±45° 方向极值即四个角）
@@ -273,7 +285,7 @@ public final class ArucoDetector {
         for p in pts where !uniq.contains(where: { abs($0.x - p.x) + abs($0.y - p.y) < 1 }) {
             uniq.append(p)
         }
-        guard uniq.count == 4 else { if big { dlog("corners=\(uniq.count)") }; return nil }
+        guard uniq.count == 4 else { if big { dlog("corners=\(uniq.count)") }; return reject("corners") }
         pts = uniq
 
         // 绕质心按 atan2 排序（图像 y 向下时等同于视觉顺时针），再从最接近左上角者开始
@@ -289,9 +301,9 @@ public final class ArucoDetector {
         for i in 0..<4 {
             let a = pts[i], b = pts[(i + 1) % 4], d = pts[(i + 2) % 4]
             let cross = (b.x - a.x) * (d.y - b.y) - (b.y - a.y) * (d.x - b.x)
-            if abs(cross) < 1 { if big { dlog("degenerate cross=\(cross)") }; return nil }
+            if abs(cross) < 1 { if big { dlog("degenerate cross=\(cross)") }; return reject("degenerate") }
             let sign = cross > 0 ? 1 : -1
-            if crossSign == 0 { crossSign = sign } else if sign != crossSign { if big { dlog("concave") }; return nil }
+            if crossSign == 0 { crossSign = sign } else if sign != crossSign { if big { dlog("concave") }; return reject("concave") }
         }
 
         // 边长与面积过滤
@@ -299,26 +311,26 @@ public final class ArucoDetector {
         for i in 0..<4 {
             sides.append(hypot(pts[(i + 1) % 4].x - pts[i].x, pts[(i + 1) % 4].y - pts[i].y))
         }
-        guard sides.allSatisfy({ $0 >= minSide }) else { return nil }   // 小噪声太多，不记录
+        guard sides.allSatisfy({ $0 >= minSide }) else { return reject("minSide") }   // 小噪声太多，不记录
         let quadArea = 0.5 * abs(
             (pts[0].x * pts[1].y + pts[1].x * pts[2].y + pts[2].x * pts[3].y + pts[3].x * pts[0].y)
           - (pts[1].x * pts[0].y + pts[2].x * pts[1].y + pts[3].x * pts[2].y + pts[0].x * pts[3].y))
-        guard quadArea <= Double(w * h) * maxQuadAreaRatio else { dlog("quadArea=\(Int(quadArea)) too big"); return nil }
+        guard quadArea <= Double(w * h) * maxQuadAreaRatio else { dlog("quadArea=\(Int(quadArea)) too big"); return reject("quadArea") }
         let fill = Double(c.count) / quadArea
         guard fill >= minFillRatio && fill <= maxFillRatio else {
-            dlog("fill=\(String(format: "%.2f", fill)) count=\(c.count) quadArea=\(Int(quadArea))"); return nil
+            dlog("fill=\(String(format: "%.2f", fill)) count=\(c.count) quadArea=\(Int(quadArea))"); return reject("fill")
         }
 
         // 亚像素角点精化（Phase 1.2）：法向剖面 + TLS 直线拟合。
         // NOTE: 极值角点来自暗组件像素中心，系统性偏内 ~0.5px，精化同时修正该偏移；
         // 小标记（帧上 <20px）角点偏 1px 就会把 6×6 格采样压到边框环上导致解码失败，
         // 这是 20pt 远距标记命中率低的主因之一
-        pts = refineCorners(pts, w: w, h: h)
+        if subpixelRefine { pts = refineCorners(pts, w: w, h: h) }
 
         // 单应：规范 6×6 格坐标 → 图像四边形（corners 顺序一致，采样结果只差整体旋转）
         guard let H = Homography(src: [CGPoint(x: 0, y: 0), CGPoint(x: 6, y: 0),
                                        CGPoint(x: 6, y: 6), CGPoint(x: 0, y: 6)],
-                                 dst: pts) else { return nil }
+                                 dst: pts) else { return reject("homography") }
         func sampleCell(_ col: Double, _ row: Double) -> Double {
             let p = H.map(CGPoint(x: col, y: row))
             return sampleGray(x: p.x, y: p.y, w: w, h: h)
@@ -331,12 +343,12 @@ public final class ArucoDetector {
                 cell[r * 6 + cl] = sampleCell(Double(cl) + 0.5, Double(r) + 0.5)
             }
         }
-        guard let thr = gapThreshold(cell) else { dlog("threshold failed (无双峰对比)"); return nil }
+        guard let thr = gapThreshold(cell) else { dlog("threshold failed (无双峰对比)"); return reject("threshold") }
 
         // 边框环必须全黑（低于阈值）
         for r in 0..<6 {
             for cl in 0..<6 where r == 0 || r == 5 || cl == 0 || cl == 5 {
-                if cell[r * 6 + cl] >= thr { dlog("border(\(r),\(cl))=\(Int(cell[r*6+cl])) >= thr=\(Int(thr))"); return nil }
+                if cell[r * 6 + cl] >= thr { dlog("border(\(r),\(cl))=\(Int(cell[r*6+cl])) >= thr=\(Int(thr))"); return reject("border") }
             }
         }
         // 外圈（标记外的白色底卡环）必须明显亮——拒绝并入暗背景的实心块
@@ -350,7 +362,7 @@ public final class ArucoDetector {
             }
         }
         guard outerSum / 20 > thr + outerRingMargin else {
-            dlog("outerRing=\(Int(outerSum/20)) thr=\(Int(thr))"); return nil
+            dlog("outerRing=\(Int(outerSum/20)) thr=\(Int(thr))"); return reject("outerRing")
         }
 
         // 内层 4×4 打包（亮=1），4 旋转查字典
@@ -362,7 +374,7 @@ public final class ArucoDetector {
             }
         }
         guard let hit = ArucoDictionary.lookup(bits) else {
-            dlog(String(format: "bits=0x%04X not in dict", bits)); return nil
+            dlog(String(format: "bits=0x%04X not in dict", bits)); return reject("dict")
         }
 
         let center = CGPoint(x: pts.reduce(0) { $0 + $1.x } / 4,
