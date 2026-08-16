@@ -11,6 +11,7 @@
 		4B5E031A124025191EE682FF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 570CDB1B79715F6D759EFE6A /* Assets.xcassets */; };
 		4CFCCB77CF72136A2046BCCC /* AimPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E499E972D884E3FC90FB661A /* AimPhoneApp.swift */; };
 		A1A173954DDAB47019D8530B /* MarkerDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */; };
+		AC385CE5A40AF5BB787DBBF0 /* OneEuroFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54467DA7B5F1F7876F34FCC /* OneEuroFilter.swift */; };
 		BF520732211D33E182F3258D /* ScreenLocalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */; };
 		CF0C190E4FB427B2799F2E0A /* ArucoDictionary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */; };
 		E4AF9E8E8EA6ADEB992E7FAF /* GimbalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830EBE3C6A616155318C105A /* GimbalManager.swift */; };
@@ -28,6 +29,7 @@
 		AECA2E6D05700778951A4826 /* Homography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Homography.swift; sourceTree = "<group>"; };
 		E499E972D884E3FC90FB661A /* AimPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AimPhoneApp.swift; sourceTree = "<group>"; };
 		E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenLocalizer.swift; sourceTree = "<group>"; };
+		F54467DA7B5F1F7876F34FCC /* OneEuroFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneEuroFilter.swift; sourceTree = "<group>"; };
 		F801D5BF510A50654CB415E0 /* CameraStreamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraStreamer.swift; sourceTree = "<group>"; };
 		FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkerDetector.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -39,6 +41,7 @@
 				66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */,
 				AECA2E6D05700778951A4826 /* Homography.swift */,
 				FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */,
+				F54467DA7B5F1F7876F34FCC /* OneEuroFilter.swift */,
 				E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */,
 			);
 			name = ScreenAimCore;
@@ -153,6 +156,7 @@
 				E4AF9E8E8EA6ADEB992E7FAF /* GimbalManager.swift in Sources */,
 				F898C1AE86A0AE9866D63EAC /* Homography.swift in Sources */,
 				A1A173954DDAB47019D8530B /* MarkerDetector.swift in Sources */,
+				AC385CE5A40AF5BB787DBBF0 /* OneEuroFilter.swift in Sources */,
 				BF520732211D33E182F3258D /* ScreenLocalizer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

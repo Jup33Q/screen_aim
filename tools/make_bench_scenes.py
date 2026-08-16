@@ -48,7 +48,7 @@ def random_dst(rng, far=False, mid=False):
     ]
 
 
-def gen(name, rng, bg, marker_px, dst, blur):
+def gen(name, rng, bg, marker_px, dst, blur, noise_amp=8):
     screen, centers = M.make_screen(rng, bg, marker_px)
     src = [(0, 0), (M.SCREEN_W, 0), (M.SCREEN_W, M.SCREEN_H), (0, M.SCREEN_H)]
     H_s2f = M.solve_homography(np.array(src), np.array(dst))
@@ -63,7 +63,7 @@ def gen(name, rng, bg, marker_px, dst, blur):
     frame = Image.composite(frame, ambient, mask)
     frame = frame.filter(ImageFilter.GaussianBlur(radius=blur))
     arr = np.asarray(frame).astype(np.int16)
-    arr = np.clip(arr + rng.integers(-8, 9, arr.shape), 0, 255).astype(np.uint8)
+    arr = np.clip(arr + rng.integers(-noise_amp, noise_amp + 1, arr.shape), 0, 255).astype(np.uint8)
     Image.fromarray(arr).save(OUT / f"{name}.png")
 
     H_f2s = np.linalg.inv(H_s2f)
@@ -99,10 +99,12 @@ if __name__ == "__main__":
         rng = np.random.default_rng(400 + i)
         gen(f"bench20far_{i:02d}", rng, bg, 40,
             dst=random_dst(rng, far=True), blur=rng.uniform(0.6, 1.2))
-    # 静止 σ 组：固定视角 + 固定模糊，24 帧仅噪声种子不同（模拟手机静止连拍）
+    # 静止 σ 组：固定视角，24 帧模糊/噪声逐帧变化（模拟真实传感器噪声 + JPEG 压缩
+    # 逐帧差异——固定模糊+弱噪声下检出值会卡在量化档上长程相关，不是真实噪声形态）
     geo_rng = np.random.default_rng(7)
     fixed_dst = random_dst(geo_rng)
     for i in range(24):
-        gen(f"static48_{i:02d}", np.random.default_rng(900 + i), bg, 48,
-            dst=fixed_dst, blur=0.7)
+        rng = np.random.default_rng(900 + i)
+        gen(f"static48_{i:02d}", rng, bg, 48,
+            dst=fixed_dst, blur=rng.uniform(0.5, 1.0), noise_amp=16)
     print("done ->", OUT)

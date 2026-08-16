@@ -49,6 +49,9 @@ final class ScreenSampler: NSObject, SCStreamOutput {
     // Phase 0 基线测量：FPS 窗口内的检测耗时累计（processBGRA 打点，tickFPS 取均值输出）
     private var detectMsSum = 0.0
     private var detectCount = 0
+    // 输出侧 One Euro 滤波（Phase 1.3，与 ScreenLocalizer 同款参数）：x/y 各一实例
+    private var aimFilterX = OneEuroFilter(), aimFilterY = OneEuroFilter()
+    private var noAimFrames = 0
 
     // 屏幕定位码 ID -> 屏幕坐标（左上角原点，单位：点）；≥4 项即可映射（冗余 8 标记，ADR-007）
     // dst 用什么单位，映射结果就是什么单位；homography 自动吸收采样降分辨率的比例
@@ -167,16 +170,36 @@ final class ScreenSampler: NSObject, SCStreamOutput {
             src.append(NSValue(point: m.center))
             dst.append(NSValue(point: screenPt))
         }
-        guard src.count >= 4 else { return }
+        guard src.count >= 4 else {
+            registerNoAim()
+            return
+        }
 
         var ok = ObjCBool(false)
         // 帧中心 = 瞄准点；结果单位与 screenCornerMap 一致（点坐标，左上角原点）
         let mapped = OpenCVBridge.mapPointRANSAC(CGPoint(x: w / 2, y: h / 2),
                                                  srcPoints: src, dstPoints: dst,
                                                  success: &ok)
-        if ok.boolValue {
-            print(String(format: "瞄准点 -> 屏幕坐标 (%.0f, %.0f)", mapped.x, mapped.y))
-            onAim?(mapped)
+        guard ok.boolValue else {
+            registerNoAim()
+            return
+        }
+        noAimFrames = 0
+        // One Euro 滤波（Phase 1.3）：墙钟 dt（本队列逐帧处理，间隔即帧间隔）
+        let t = CACurrentMediaTime()
+        let filtered = CGPoint(x: aimFilterX.filter(mapped.x, at: t),
+                               y: aimFilterY.filter(mapped.y, at: t))
+        print(String(format: "瞄准点 -> 屏幕坐标 (%.0f, %.0f)", filtered.x, filtered.y))
+        onAim?(filtered)
+    }
+
+    /// 连续 10 帧无输出后重置滤波器：避免恢复后瞄准点被过期状态拖走（与 ScreenLocalizer 同策略）
+    private func registerNoAim() {
+        noAimFrames += 1
+        if noAimFrames >= 10 {
+            aimFilterX.reset()
+            aimFilterY.reset()
+            noAimFrames = 0
         }
     }
 
@@ -1285,6 +1308,69 @@ if let di = CommandLine.arguments.firstIndex(of: "--swift-detect"),
     } else {
         print("瞄准点: 至少一个检测器未集齐 4 角，无法对比")
     }
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--swift-seq") {
+    setbuf(stdout, nil)
+    // 序列基准（Phase 1.3 验收）：按序对一组场景图（shell glob 展开成多个参数）
+    // 跑 ScreenLocalizer，同帧对比未滤波 / One Euro 滤波两条轨迹的静止 σ。
+    // 真值映射表取首个同名 JSON 的 logical（静止组几何固定）；时间戳按 30fps 合成，
+    // 与相机帧率一致——滤波效果依赖 dt，墙钟（检测耗时长）会低估消抖能力
+    let args = Array(CommandLine.arguments.drop(while: { $0 != "--swift-seq" }).dropFirst())
+    let files = args.filter { $0.hasSuffix(".png") }
+    // 可选 --cutoff C --beta B：扫描滤波参数（验收调参用，默认 1.0 / 0.5）
+    func opt(_ name: String, _ fallback: Double) -> Double {
+        guard let i = args.firstIndex(of: name), args.count > i + 1,
+              let v = Double(args[i + 1]) else { return fallback }
+        return v
+    }
+    let cutoff = opt("--cutoff", 1.0), beta = opt("--beta", 0.5)
+    let raw = ScreenLocalizer()     // 未滤波对照
+    raw.aimFilterEnabled = false
+    let flt = ScreenLocalizer()
+    flt.aimFilterX.minCutoff = cutoff; flt.aimFilterY.minCutoff = cutoff
+    flt.aimFilterX.beta = beta; flt.aimFilterY.beta = beta
+    var mapLoaded = false
+    var rawAims: [CGPoint] = [], fltAims: [CGPoint] = []
+    for (i, f) in files.enumerated() {
+        if !mapLoaded {
+            let js = (f as NSString).deletingPathExtension + ".json"
+            if let d = FileManager.default.contents(atPath: js),
+               let gt = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+               let lg = gt["logical"] as? [String: [Double]] {
+                let map = lg.reduce(into: [Int: CGPoint]()) {
+                    $0[Int($1.key) ?? -1] = CGPoint(x: $1.value[0], y: $1.value[1])
+                }
+                raw.screenCornerMap = map
+                flt.screenCornerMap = map
+                mapLoaded = true
+            }
+        }
+        guard let (data, w, h) = loadBGRA(from: f) else { continue }
+        let ts = Double(i) / 30.0   // 合成 30fps 时间轴
+        let r0 = data.withUnsafeBytes {
+            raw.localize(bgra: $0.baseAddress!, width: w, height: h, bytesPerRow: w * 4,
+                         timestamp: ts)
+        }
+        let r1 = data.withUnsafeBytes {
+            flt.localize(bgra: $0.baseAddress!, width: w, height: h, bytesPerRow: w * 4,
+                         timestamp: ts)
+        }
+        if let a = r0.aim { rawAims.append(a) }
+        if let a = r1.aim { fltAims.append(a) }
+    }
+    func sigmaR(_ pts: [CGPoint]) -> Double {
+        guard pts.count > 1 else { return 0 }
+        let n = Double(pts.count)
+        let mx = pts.map(\.x).reduce(0, +) / n, my = pts.map(\.y).reduce(0, +) / n
+        let sx = sqrt(pts.map { ($0.x - mx) * ($0.x - mx) }.reduce(0, +) / (n - 1))
+        let sy = sqrt(pts.map { ($0.y - my) * ($0.y - my) }.reduce(0, +) / (n - 1))
+        return hypot(sx, sy)
+    }
+    print(String(format: "序列 %d 帧（cutoff=%.2f beta=%.2f）：未滤波 σr=%.4fpt（n=%d） vs One Euro σr=%.4fpt（n=%d）",
+                 files.count, cutoff, beta, sigmaR(rawAims), rawAims.count,
+                 sigmaR(fltAims), fltAims.count))
     exit(0)
 }
 

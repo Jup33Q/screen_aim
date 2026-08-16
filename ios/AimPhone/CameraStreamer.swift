@@ -462,14 +462,16 @@ extension CameraStreamer {
     /// 结果回主线程发布；同时打 LOCALAIM 日志并上报 Mac（控制帧）供两端输出对照。
     /// 上报 JSON 含 detected / missing 两个 ID 数组，Mac 端可分辨具体缺哪个定位码；
     /// `detect_ms` 为本帧检测+映射耗时（Phase 0 基线测量用，只加不删保持向后兼容）
-    fileprivate func localizeFrame(_ pb: CVPixelBuffer) {
+    fileprivate func localizeFrame(_ pb: CVPixelBuffer, timestamp: CFAbsoluteTime) {
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(pb) else { return }
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         let bpr = CVPixelBufferGetBytesPerRow(pb)
         let t0 = CFAbsoluteTimeGetCurrent()
-        let result = localizer.localize(bgra: base, width: w, height: h, bytesPerRow: bpr)
+        // 传采集 PTS 而非墙钟：滤波器 dt 精度直接影响 One Euro 消抖效果（Phase 1.3）
+        let result = localizer.localize(bgra: base, width: w, height: h, bytesPerRow: bpr,
+                                        timestamp: timestamp)
         let detectMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         DispatchQueue.main.async {
             self.localMarkerCount = result.markers.count
@@ -558,7 +560,8 @@ extension CameraStreamer: AVCaptureVideoDataOutputSampleBufferDelegate {
         let now0 = CFAbsoluteTimeGetCurrent()
         if now0 - lastLocalizeTime >= 0.01 {
             lastLocalizeTime = now0
-            localizeFrame(pb)
+            localizeFrame(pb, timestamp: CMTimeGetSeconds(
+                CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
         }
 
         // DEBUG: 帧计数诊断（每 15 帧刷一次 UI，验证回调链路）
