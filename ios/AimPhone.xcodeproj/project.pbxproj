@@ -1,0 +1,344 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		21413713EAC1C6591477A25E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 935833E6F836BDAF47F01ED6 /* ContentView.swift */; };
+		4B5E031A124025191EE682FF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 570CDB1B79715F6D759EFE6A /* Assets.xcassets */; };
+		4CFCCB77CF72136A2046BCCC /* AimPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E499E972D884E3FC90FB661A /* AimPhoneApp.swift */; };
+		A1A173954DDAB47019D8530B /* MarkerDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */; };
+		BF520732211D33E182F3258D /* ScreenLocalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */; };
+		CF0C190E4FB427B2799F2E0A /* ArucoDictionary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */; };
+		E4AF9E8E8EA6ADEB992E7FAF /* GimbalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830EBE3C6A616155318C105A /* GimbalManager.swift */; };
+		ED3B37E721CC705253961C50 /* CameraStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F801D5BF510A50654CB415E0 /* CameraStreamer.swift */; };
+		F898C1AE86A0AE9866D63EAC /* Homography.swift in Sources */ = {isa = PBXBuildFile; fileRef = AECA2E6D05700778951A4826 /* Homography.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		276ABCAE4B7D65A82CFB10A4 /* AimPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AimPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		570CDB1B79715F6D759EFE6A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArucoDictionary.swift; sourceTree = "<group>"; };
+		671158DC7200C25D7D0D0139 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		830EBE3C6A616155318C105A /* GimbalManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GimbalManager.swift; sourceTree = "<group>"; };
+		935833E6F836BDAF47F01ED6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		AECA2E6D05700778951A4826 /* Homography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Homography.swift; sourceTree = "<group>"; };
+		E499E972D884E3FC90FB661A /* AimPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AimPhoneApp.swift; sourceTree = "<group>"; };
+		E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenLocalizer.swift; sourceTree = "<group>"; };
+		F801D5BF510A50654CB415E0 /* CameraStreamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraStreamer.swift; sourceTree = "<group>"; };
+		FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkerDetector.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		743A8CF4986AAF60A6FD1420 /* ScreenAimCore */ = {
+			isa = PBXGroup;
+			children = (
+				66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */,
+				AECA2E6D05700778951A4826 /* Homography.swift */,
+				FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */,
+				E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */,
+			);
+			name = ScreenAimCore;
+			path = ../Sources/ScreenAimCore;
+			sourceTree = "<group>";
+		};
+		9586D788FBA9050379571BF6 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				276ABCAE4B7D65A82CFB10A4 /* AimPhone.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		9B5740FA84C180B66FFAFA10 = {
+			isa = PBXGroup;
+			children = (
+				A0A538D4EFFAA0C9600FF39B /* AimPhone */,
+				743A8CF4986AAF60A6FD1420 /* ScreenAimCore */,
+				9586D788FBA9050379571BF6 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A0A538D4EFFAA0C9600FF39B /* AimPhone */ = {
+			isa = PBXGroup;
+			children = (
+				E499E972D884E3FC90FB661A /* AimPhoneApp.swift */,
+				570CDB1B79715F6D759EFE6A /* Assets.xcassets */,
+				F801D5BF510A50654CB415E0 /* CameraStreamer.swift */,
+				935833E6F836BDAF47F01ED6 /* ContentView.swift */,
+				830EBE3C6A616155318C105A /* GimbalManager.swift */,
+				671158DC7200C25D7D0D0139 /* Info.plist */,
+			);
+			path = AimPhone;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		17CE27E094418C2D4924C3CD /* AimPhone */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 50358A69422E91545B6B6597 /* Build configuration list for PBXNativeTarget "AimPhone" */;
+			buildPhases = (
+				F739A15F9BB28F2871FF9728 /* Sources */,
+				7F20A95BF3D76F3A22CBB29F /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AimPhone;
+			packageProductDependencies = (
+			);
+			productName = AimPhone;
+			productReference = 276ABCAE4B7D65A82CFB10A4 /* AimPhone.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CB8AA4082D6F6B44CE74A3F1 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					17CE27E094418C2D4924C3CD = {
+						DevelopmentTeam = 4VF7272J66;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 6C5361EA6ADABE8CE8993A60 /* Build configuration list for PBXProject "AimPhone" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 9B5740FA84C180B66FFAFA10;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 9586D788FBA9050379571BF6 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				17CE27E094418C2D4924C3CD /* AimPhone */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		7F20A95BF3D76F3A22CBB29F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4B5E031A124025191EE682FF /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		F739A15F9BB28F2871FF9728 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4CFCCB77CF72136A2046BCCC /* AimPhoneApp.swift in Sources */,
+				CF0C190E4FB427B2799F2E0A /* ArucoDictionary.swift in Sources */,
+				ED3B37E721CC705253961C50 /* CameraStreamer.swift in Sources */,
+				21413713EAC1C6591477A25E /* ContentView.swift in Sources */,
+				E4AF9E8E8EA6ADEB992E7FAF /* GimbalManager.swift in Sources */,
+				F898C1AE86A0AE9866D63EAC /* Homography.swift in Sources */,
+				A1A173954DDAB47019D8530B /* MarkerDetector.swift in Sources */,
+				BF520732211D33E182F3258D /* ScreenLocalizer.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		32F575633C83B374D97C8A9A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		C450AC3CCC4CB9D4F7C5A135 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4VF7272J66;
+				INFOPLIST_FILE = AimPhone/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.screenaim.AimPhone;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C530D1CA5B1CBD4CF694236B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4VF7272J66;
+				INFOPLIST_FILE = AimPhone/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.screenaim.AimPhone;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		EBDEDF06F08309AE7A433FAF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		50358A69422E91545B6B6597 /* Build configuration list for PBXNativeTarget "AimPhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C530D1CA5B1CBD4CF694236B /* Debug */,
+				C450AC3CCC4CB9D4F7C5A135 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6C5361EA6ADABE8CE8993A60 /* Build configuration list for PBXProject "AimPhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EBDEDF06F08309AE7A433FAF /* Debug */,
+				32F575633C83B374D97C8A9A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = CB8AA4082D6F6B44CE74A3F1 /* Project object */;
+}

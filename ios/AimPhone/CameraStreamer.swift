@@ -1,0 +1,571 @@
+//
+//  CameraStreamer.swift
+//  AimPhone（iOS 端）— 相机采集 + JPEG 推流 + 连接管理 + 扫码配对
+//
+//  关键约束：像素处理/相机配置全在 aimphone.capture 串行队列；帧中心即瞄准点，
+//  识别与映射在 Mac 端（见 docs/architecture.md、docs/protocol.md）
+//
+
+import Foundation
+import AVFoundation
+import CoreImage
+import Network
+import Combine
+import Vision
+
+/// 相机可用性状态：驱动权限拒绝 / 配置失败的兜底 UI
+enum CameraAvailability: Equatable {
+    case unknown, available, unauthorized, failed(String)
+}
+
+/// 相机采集 + JPEG 推流（TCP 帧协议: [4字节大端长度][JPEG]）
+/// 帧中心即瞄准点，Mac 端负责识别与坐标映射
+final class CameraStreamer: NSObject, ObservableObject {
+    @Published var isConnected = false
+    @Published var statusText = "未连接"
+    @Published var framesSent = 0
+    @Published var framesSeen = 0      // 相机帧计数（诊断用，验证回调链路）
+    @Published var scanning = false    // 正在主动搜索二维码
+    @Published var isConnecting = false   // 连接进行中（UI 显示取消按钮）
+    @Published var connectionError = false  // 连接最终失败（UI 状态着色用）
+    @Published var cameraAvailability: CameraAvailability = .unknown
+    @Published var streamPaused = false   // 云台快门键触发：暂停/恢复推流（采集继续，只停发送）
+    @Published var localMarkerCount = 0   // 本机识别：本帧检出的定位码数量
+    @Published var localAim: CGPoint?     // 本机识别：帧中心映射到屏幕坐标（Mac 语义一致）
+    @Published var calibSource = "默认参数"  // 标定映射表来源：默认参数 / Mac 下发
+    @Published var pairingQRVisibleOnMac = false  // Mac 端配对二维码当前是否可见（Mac 状态推送，protocol.md §6）
+
+    /// 本机识别（iOS 端坐标转换测试）：与 Mac 端同一套 ScreenAimCore 代码。
+    /// 默认映射表对应 Mac 1728×1117 屏 + Calibrator 默认参数（24pt 标记 / 24pt 边距），
+    /// Mac 连上后会通过控制信道下发真实标定值覆盖（见 docs/protocol.md §6）
+    let localizer = ScreenLocalizer()
+    private var lastLocalizeTime: CFAbsoluteTime = 0
+    private var localizeCounter = 0
+
+    let session = AVCaptureSession()
+    private let videoQueue = DispatchQueue(label: "aimphone.capture")
+    private let ciContext = CIContext()
+    private var connection: NWConnection?
+    private var retryCount = 0
+    var onScanned: ((String, UInt16) -> Void)?   // 扫码成功回调（UI 回填 IP/端口）
+    private var lastSendTime: CFAbsoluteTime = 0
+    private var lastQRCheck: CFAbsoluteTime = 0
+    private var scanDeadline: CFAbsoluteTime = 0
+    private var frameCounter = 0
+    private var activeDevice: AVCaptureDevice?
+    var frameInterval: CFAbsoluteTime = 1.0 / 15.0   // 15fps 足够瞄准用途
+
+    /// 实时亮度调节：v ∈ 0...1 映射到 ISO [minISO, minISO × 10]
+    func setBrightness(_ v: Float) {
+        videoQueue.async { [weak self] in
+            guard let device = self?.activeDevice,
+                  device.isExposureModeSupported(.custom) else { return }
+            try? device.lockForConfiguration()
+            let minISO = device.activeFormat.minISO
+            let iso = min(minISO * (1 + v * 9), device.activeFormat.maxISO)
+            device.setExposureModeCustom(duration: CMTime(value: 1, timescale: 120),
+                                         iso: iso, completionHandler: nil)
+            device.unlockForConfiguration()
+        }
+    }
+
+    // MARK: 云台按键映射（DockKit accessoryEvents → AVFoundation）
+
+    /// 智控轮盘变焦：factor 为绝对变焦倍率，钳制到当前设备支持范围
+    func setZoomFactor(_ factor: Double) {
+        videoQueue.async { [weak self] in
+            guard let device = self?.activeDevice else { return }
+            let clamped = min(max(CGFloat(factor), device.minAvailableVideoZoomFactor),
+                              device.maxAvailableVideoZoomFactor)
+            try? device.lockForConfiguration()
+            device.videoZoomFactor = clamped
+            device.unlockForConfiguration()
+        }
+    }
+
+    /// 翻转键：前后摄切换；新设备失败时回滚旧输入，配置沿用 applyDeviceSettings
+    func flipCamera() {
+        videoQueue.async { [weak self] in
+            guard let self, self.sessionConfigured, let current = self.activeDevice else { return }
+            let newPosition: AVCaptureDevice.Position = current.position == .back ? .front : .back
+            guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video,
+                                                       position: newPosition),
+                  let newInput = try? AVCaptureDeviceInput(device: device) else { return }
+            let oldInputs = self.session.inputs
+            self.session.beginConfiguration()
+            oldInputs.forEach { self.session.removeInput($0) }
+            if self.session.canAddInput(newInput) {
+                self.session.addInput(newInput)
+                self.applyDeviceSettings(device)
+                self.activeDevice = device
+            } else {
+                // 回滚：恢复原输入
+                oldInputs.forEach { if self.session.canAddInput($0) { self.session.addInput($0) } }
+            }
+            self.session.commitConfiguration()
+        }
+    }
+
+    /// 快门键：暂停/恢复推流（不中断采集与扫码逻辑）
+    func toggleStreamPaused() {
+        DispatchQueue.main.async {
+            self.streamPaused.toggle()
+        }
+    }
+
+    override init() {
+        super.init()
+        // 默认映射表：Calibrator 默认参数（markerSize 24 / inset 24）在 1728×1117 屏上的标记中心
+        localizer.screenCornerMap = [
+            0: CGPoint(x: 36, y: 36), 1: CGPoint(x: 1692, y: 36),
+            2: CGPoint(x: 1692, y: 1081), 3: CGPoint(x: 36, y: 1081),
+        ]
+        configureSession()
+    }
+
+    // MARK: 相机
+    private var sessionConfigured = false
+
+    private func configureSession() {
+        // 权限前置检查：拒绝/受限时给出明确状态，避免用户面对黑屏
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            break
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if granted { self.configureSession() }
+                    else { self.cameraAvailability = .unauthorized }
+                }
+            }
+            return
+        default:
+            cameraAvailability = .unauthorized
+            return
+        }
+        guard !sessionConfigured else { return }
+        session.beginConfiguration()
+        session.sessionPreset = .hd1280x720
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            session.commitConfiguration()
+            cameraAvailability = .failed("未找到可用后置相机或输入配置失败")
+            return
+        }
+        session.addInput(input)
+        applyDeviceSettings(device)
+        activeDevice = device
+
+        let output = AVCaptureVideoDataOutput()
+        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        output.alwaysDiscardsLateVideoFrames = true
+        output.setSampleBufferDelegate(self, queue: videoQueue)
+        if session.canAddOutput(output) { session.addOutput(output) }
+        session.commitConfiguration()
+        sessionConfigured = true
+        cameraAvailability = .available
+    }
+
+    /// 对焦/白平衡/手动曝光统一配置：初始配置与云台翻转切换前后摄共用
+    /// 手动曝光 1/120s（抑制屏幕条纹）+ 低 ISO（防止屏幕白底过曝）
+    private func applyDeviceSettings(_ device: AVCaptureDevice) {
+        try? device.lockForConfiguration()
+        device.focusMode = .continuousAutoFocus
+        if device.isExposureModeSupported(.custom) {
+            let iso = min(device.activeFormat.minISO * 1.5, device.activeFormat.maxISO)
+            device.setExposureModeCustom(duration: CMTime(value: 1, timescale: 120),
+                                         iso: iso, completionHandler: nil)
+        }
+        device.whiteBalanceMode = .continuousAutoWhiteBalance
+        device.unlockForConfiguration()
+    }
+
+    func startCamera() {
+        videoQueue.async { [session] in
+            if !session.isRunning { session.startRunning() }
+        }
+        startBrowsing()   // 同时开始 Bonjour 自动发现 Mac
+    }
+
+    func stopCamera() {
+        videoQueue.async { [session] in
+            if session.isRunning { session.stopRunning() }
+        }
+    }
+
+    // MARK: 连接（带 5 秒看门狗 + 自动重试，解决本地网络授权弹窗期连接卡死）
+    /// 手动断开后禁止 Bonjour 自动重连；只有用户显式连接（按钮/扫码/云台翻转键）才解除
+    private var suppressAutoConnect = false
+
+    func connect(host: String, port: UInt16) {
+        guard !isConnecting else { return }
+        guard let p = NWEndpoint.Port(rawValue: port) else { return }
+        suppressAutoConnect = false   // 显式连接：恢复自动发现
+        retryCount = 0
+        isConnecting = true
+        connectionError = false
+        statusText = "连接中… \(host):\(port)"
+        startConnection(endpoint: .hostPort(host: NWEndpoint.Host(host), port: p),
+                        label: "\(host):\(port)")
+    }
+
+    /// Bonjour 发现的直连端点
+    func connectEndpoint(_ endpoint: NWEndpoint, label: String) {
+        guard !isConnecting else { return }
+        retryCount = 0
+        isConnecting = true
+        connectionError = false
+        statusText = "连接中… \(label)"
+        startConnection(endpoint: endpoint, label: label)
+    }
+
+    private func startConnection(endpoint: NWEndpoint, label: String) {
+        connection?.cancel()
+        let conn = NWConnection(to: endpoint, using: .tcp)
+        connection = conn
+        conn.stateUpdateHandler = { [weak self] state in
+            DispatchQueue.main.async {
+                // NOTE: 必须校验连接身份——旧连接（已 cancel/被替换）的迟到状态回调
+                // 不允许影响新连接，否则旧连接的 .failed 会用旧 endpoint 触发重试，
+                // 把正在进行的新连接 cancel 掉（断开后重连失败的根因之一）
+                guard let self, self.connection === conn else { return }
+                switch state {
+                case .ready:
+                    self.retryCount = 0
+                    self.isConnecting = false
+                    self.isConnected = true
+                    self.connectionError = false
+                    self.streamPaused = false   // 新连接复位推流暂停，避免"连上但没画面"
+                    self.statusText = "已连接 \(label)"
+                    // 连上后停止 Bonjour 浏览
+                    self.browser?.cancel()
+                    self.browser = nil
+                    // 控制信道：接收 Mac 下发的标定映射表（docs/protocol.md §6）
+                    self.receiveControl(conn)
+                case .failed(let e):
+                    if self.isConnected {
+                        // NOTE: 已建立的连接意外断开（网络波动/Mac 端退出）：
+                        // 必须清状态，否则 isConnected 永远卡 true，扫码按钮被隐藏、
+                        // scanQRCode 被 guard 拦截——表现为"断开后再次扫码无反应"
+                        self.isConnected = false
+                        self.connection = nil
+                        self.pairingQRVisibleOnMac = false
+                        self.connectionError = true
+                        self.statusText = "连接已断开: \(e.localizedDescription)"
+                        self.startBrowsing()   // 非手动断开：允许 Bonjour 自动找回
+                    } else if self.isConnecting && self.retryCount < 6 {
+                        // 失败快速重试，不傻等看门狗
+                        self.retryCount += 1
+                        self.statusText = "连接失败，1 秒后第 \(self.retryCount) 次重试…"
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                            guard let self, self.isConnecting, !self.isConnected,
+                                  self.connection === conn else { return }
+                            self.startConnection(endpoint: endpoint, label: label)
+                        }
+                    } else if self.isConnecting {
+                        self.isConnecting = false
+                        self.connectionError = true
+                        self.statusText = "连接失败: \(e.localizedDescription)"
+                    }
+                case .waiting:
+                    self.statusText = "等待网络…（若弹出本地网络授权请点允许）"
+                case .cancelled:
+                    break
+                default:
+                    break
+                }
+            }
+        }
+        conn.start(queue: .global(qos: .userInitiated))
+
+        // NOTE: 看门狗——5 秒内没 ready 就取消重来；本地网络授权弹窗期的连接会永久卡死，必须重启
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.isConnecting, !self.isConnected,
+                  self.connection === conn else { return }
+            self.retryCount += 1
+            if self.retryCount <= 6 {
+                self.statusText = "连接超时，第 \(self.retryCount) 次重试…"
+                self.startConnection(endpoint: endpoint, label: label)
+            } else {
+                self.isConnecting = false
+                self.connectionError = true
+                self.statusText = "多次连接失败：检查 Mac 服务是否在运行，以及 设置 > AimPhone 的本地网络权限"
+            }
+        }
+    }
+
+    // MARK: Bonjour 自动发现（无需 IP，主方案）
+    private var browser: NWBrowser?
+
+    func startBrowsing() {
+        guard browser == nil else { return }
+        let b = NWBrowser(for: .bonjour(type: "_aimphone._tcp", domain: nil), using: .tcp)
+        browser = b
+        b.browseResultsChangedHandler = { [weak self] results, _ in
+            DispatchQueue.main.async {
+                guard let self, !self.isConnected, !self.isConnecting,
+                      !self.suppressAutoConnect,   // 手动断开后不再自动重连
+                      let result = results.first else { return }
+                let label: String
+                if case .hostPort(let host, let port) = result.endpoint {
+                    label = "\(host):\(port)"
+                } else {
+                    label = "Bonjour 服务"
+                }
+                self.statusText = "发现 Mac（\(label)），自动连接…"
+                self.connectEndpoint(result.endpoint, label: label)
+            }
+        }
+        b.stateUpdateHandler = { state in
+            print("Bonjour browser: \(state)")
+        }
+        b.start(queue: .main)
+    }
+
+    func disconnect() {
+        // NOTE: 手动断开必须抑制 Bonjour 自动重连，否则发现回调会立刻把连接拉回来
+        suppressAutoConnect = true
+        isConnecting = false
+        connectionError = false
+        retryCount = 0
+        if let conn = connection, isConnected {
+            // 先通知 Mac「手机主动断开」（protocol.md §7 disconnect），Mac 收到后
+            // 重新显示配对二维码并刷新为当前 IP；finalMessage 保证通知帧先于 FIN 发出
+            sendControl(["type": "disconnect"])
+            conn.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                      completion: .contentProcessed { _ in conn.cancel() })
+        } else {
+            connection?.cancel()
+        }
+        connection = nil
+        DispatchQueue.main.async {
+            self.isConnected = false
+            self.pairingQRVisibleOnMac = false
+            self.statusText = "未连接"
+            self.startBrowsing()   // 继续浏览只为状态展示，suppressAutoConnect 保证不自动连
+        }
+    }
+
+    // MARK: 主动扫码（按钮触发，5 秒内逐帧搜索）
+    func scanQRCode() {
+        guard !isConnected else { return }
+        DispatchQueue.main.async {
+            self.scanning = true
+            self.statusText = "正在搜索二维码…（5 秒）"
+        }
+        scanDeadline = CFAbsoluteTimeGetCurrent() + 5
+    }
+
+    /// 扫码遮罩层的取消路径
+    func cancelScan() {
+        DispatchQueue.main.async {
+            guard self.scanning else { return }
+            self.scanning = false
+            self.statusText = "已取消扫码"
+        }
+        scanDeadline = 0
+    }
+
+    // MARK: 帧处理与发送
+    private func send(jpeg: Data) {
+        guard let conn = connection else { return }
+        var len = UInt32(jpeg.count).bigEndian
+        let header = Data(bytes: &len, count: 4)
+        conn.send(content: header + jpeg, completion: .idempotent)
+        DispatchQueue.main.async { self.framesSent += 1 }
+    }
+
+    /// 切换 Mac 端配对二维码的显示/隐藏（绑定新设备用，protocol.md §7）。
+    /// 可见状态由 Mac 推送（pairingQR 消息）驱动 `pairingQRVisibleOnMac`，两端不脱节
+    func toggleMacPairingQR() {
+        guard isConnected else {
+            statusText = "未连接 Mac，无法操作配对码"
+            return
+        }
+        sendControl(["type": "togglePairingQR"])
+    }
+}
+
+// MARK: - Vision 二维码配对（直接对视频帧识别，不依赖 AVCaptureMetadataOutput）
+extension CameraStreamer {
+    fileprivate func checkPairingQR(in pb: CVPixelBuffer) {
+        let request = VNDetectBarcodesRequest { [weak self] req, _ in
+            // NOTE: 连接进行中也要跳过——否则每帧都会重复回调 handleQRText，
+            // 状态栏显示"扫码成功"但 connect() 被 isConnecting 守卫吞掉（假成功）
+            guard let self, !self.isConnected, !self.isConnecting else { return }
+            guard let obs = (req.results as? [VNBarcodeObservation])?
+                    .first(where: { $0.symbology == .qr }),
+                  let payload = obs.payloadStringValue else { return }
+            let text = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                self.scanning = false
+                self.handleQRText(text)
+            }
+        }
+        request.symbologies = [.qr]
+        try? VNImageRequestHandler(cvPixelBuffer: pb, options: [:]).perform([request])
+    }
+
+    private func handleQRText(_ text: String) {
+        // 支持两种格式：JSON {"host":"...","port":9100} 或裸文本 host:port
+        var host: String?
+        var port: UInt16?
+        if let data = text.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let h = json["host"] as? String,
+           let p = (json["port"] as? Int).flatMap({ UInt16(exactly: $0) }) {
+            host = h; port = p
+        } else {
+            let parts = text.split(separator: ":")
+            if parts.count == 2, let p = UInt16(parts[1]) {
+                host = String(parts[0]); port = p
+            }
+        }
+        guard let h = host, let p = port else {
+            statusText = "发现二维码但无法解析: \(text.prefix(40))"
+            return
+        }
+        statusText = "扫码成功 \(h):\(p)，连接中…"
+        onScanned?(h, p)      // 回调 UI 回填输入框
+        connect(host: h, port: p)
+    }
+}
+
+// MARK: - 本机识别（iOS 端坐标转换测试）+ 控制信道
+extension CameraStreamer {
+    /// 通用控制帧发送（iPhone → Mac，长度字最高位置 1，protocol.md §7）
+    private func sendControl(_ obj: [String: Any]) {
+        guard let conn = connection, isConnected,
+              let json = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        var len = (UInt32(json.count) | 0x8000_0000).bigEndian
+        let header = withUnsafeBytes(of: &len) { Data($0) }
+        conn.send(content: header + json, completion: .idempotent)
+    }
+
+    /// 对一帧相机画面做本机 ArUco 检测 + 单应映射（在 videoQueue 上同步执行）。
+    /// 结果回主线程发布；同时以 2Hz 打 LOCALAIM 日志并上报 Mac（控制帧）供两端输出对照
+    fileprivate func localizeFrame(_ pb: CVPixelBuffer) {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        let bpr = CVPixelBufferGetBytesPerRow(pb)
+        let result = localizer.localize(bgra: base, width: w, height: h, bytesPerRow: bpr)
+        DispatchQueue.main.async {
+            self.localMarkerCount = result.markers.count
+            self.localAim = result.aim
+        }
+        localizeCounter += 1
+        if localizeCounter % 5 == 0 {
+            if let aim = result.aim {
+                print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d",
+                             aim.x, aim.y, result.markers.count, 4))
+            }
+            // 本机识别结果上报 Mac（2Hz，含未集齐 4 角的空结果，便于 Mac 端 debug 对照）
+            var msg: [String: Any] = ["type": "localAim", "markers": result.markers.count]
+            if let aim = result.aim { msg["x"] = aim.x; msg["y"] = aim.y }
+            sendControl(msg)
+        }
+    }
+
+    /// 控制信道接收循环：Mac → iPhone，[4字节大端长度][JSON]，目前只有 calib 一种
+    private func receiveControl(_ conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
+            guard let self, let data, data.count == 4, error == nil, !isComplete else { return }
+            let len = data.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            guard len > 0, len < 65_536 else { return }
+            conn.receive(minimumIncompleteLength: Int(len), maximumLength: Int(len)) {
+                [weak self] body, _, bodyComplete, bodyError in
+                guard let self else { return }
+                if let body, bodyError == nil { self.handleControl(body) }
+                if bodyComplete || bodyError != nil { return }
+                self.receiveControl(conn)
+            }
+        }
+    }
+
+    /// 解析 Mac 下发的控制消息（calib 标定表 / pairingQR 二维码可见状态）
+    private func handleControl(_ data: Data) {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String else { return }
+        switch type {
+        case "calib":
+            guard let markers = obj["markers"] as? [String: [Double]] else { return }
+            var map: [Int: CGPoint] = [:]
+            for (k, v) in markers {
+                guard let id = Int(k), v.count == 2 else { continue }
+                map[id] = CGPoint(x: v[0], y: v[1])
+            }
+            guard map.count == 4 else { return }
+            videoQueue.async {
+                self.localizer.screenCornerMap = map
+            }
+            DispatchQueue.main.async {
+                self.calibSource = "Mac 下发"
+            }
+            print("CALIB received: \(map)")
+        case "pairingQR":
+            // Mac 配对二维码可见状态推送（按钮高亮跟随真实状态）
+            DispatchQueue.main.async {
+                self.pairingQRVisibleOnMac = obj["visible"] as? Bool ?? false
+            }
+        default:
+            break
+        }
+    }
+}
+
+extension CameraStreamer: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // 本机识别测试：~10Hz 节流，与推流/扫码互不阻塞（同队列顺序执行）
+        let now0 = CFAbsoluteTimeGetCurrent()
+        if now0 - lastLocalizeTime >= 0.1 {
+            lastLocalizeTime = now0
+            localizeFrame(pb)
+        }
+
+        // DEBUG: 帧计数诊断（每 15 帧刷一次 UI，验证回调链路）
+        frameCounter += 1
+        if frameCounter % 15 == 0 {
+            DispatchQueue.main.async { self.framesSeen = self.frameCounter }
+        }
+
+        // 未连接时：被动每 0.3s 一次；按下扫描键后逐帧搜索直到超时
+        if !isConnected {
+            let now = CFAbsoluteTimeGetCurrent()
+            if scanning {
+                if now > scanDeadline {
+                    DispatchQueue.main.async {
+                        self.scanning = false
+                        self.statusText = "未发现二维码，请对准后重试"
+                    }
+                } else {
+                    checkPairingQR(in: pb)
+                }
+            } else if !suppressAutoConnect, now - lastQRCheck >= 0.3 {
+                // NOTE: 手动断开后（suppressAutoConnect）关闭被动扫码——手机固定在云台上
+                // 仍对着屏幕，Mac 重显二维码会被立刻重新识别并自动回连，架空手动断开语义
+                lastQRCheck = now
+                checkPairingQR(in: pb)
+            }
+            return
+        }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastSendTime >= frameInterval else { return }
+        lastSendTime = now
+        guard !streamPaused else { return }   // 云台快门键暂停推流：帧照采，不发送
+        let image = CIImage(cvPixelBuffer: pb)
+        guard let jpeg = ciContext.jpegRepresentation(of: image,
+                                                      colorSpace: CGColorSpaceCreateDeviceRGB(),
+                                                      options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.6])
+        else { return }
+        send(jpeg: jpeg)
+    }
+}

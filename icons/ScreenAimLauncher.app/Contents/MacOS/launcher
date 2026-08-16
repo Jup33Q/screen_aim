@@ -1,0 +1,4 @@
+#!/bin/bash
+cd /Users/jup33q/Documents/kimi/screen_aim
+if [ ! -x .build/debug/ScreenAim ]; then swift build; fi
+exec .build/debug/ScreenAim --calibrate

@@ -1,0 +1,39 @@
+{
+  "" : {
+    "diagnostics" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhone-primary.dia",
+    "emit-module-dependencies" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhone-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhone-primary-emit-module.dia",
+    "pch" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhone-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhone-primary.swiftdeps"
+  },
+  "/Users/jup33q/Documents/kimi/screen_aim/ios/AimPhone/AimPhoneApp.swift" : {
+    "const-values" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhoneApp.swiftconstvalues",
+    "dependencies" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhoneApp.d",
+    "diagnostics" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhoneApp.dia",
+    "index-unit-output-path" : "/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhoneApp.o",
+    "llvm-bc" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhoneApp.bc",
+    "object" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhoneApp.o",
+    "swift-dependencies" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhoneApp.swiftdeps",
+    "swiftmodule" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/AimPhoneApp~partial.swiftmodule"
+  },
+  "/Users/jup33q/Documents/kimi/screen_aim/ios/AimPhone/CameraStreamer.swift" : {
+    "const-values" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/CameraStreamer.swiftconstvalues",
+    "dependencies" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/CameraStreamer.d",
+    "diagnostics" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/CameraStreamer.dia",
+    "index-unit-output-path" : "/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/CameraStreamer.o",
+    "llvm-bc" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/CameraStreamer.bc",
+    "object" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/CameraStreamer.o",
+    "swift-dependencies" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/CameraStreamer.swiftdeps",
+    "swiftmodule" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/CameraStreamer~partial.swiftmodule"
+  },
+  "/Users/jup33q/Documents/kimi/screen_aim/ios/AimPhone/ContentView.swift" : {
+    "const-values" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/ContentView.swiftconstvalues",
+    "dependencies" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/ContentView.d",
+    "diagnostics" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/ContentView.dia",
+    "index-unit-output-path" : "/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/ContentView.o",
+    "llvm-bc" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/ContentView.bc",
+    "object" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/ContentView.o",
+    "swift-dependencies" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/ContentView.swiftdeps",
+    "swiftmodule" : "/Users/jup33q/Documents/kimi/screen_aim/ios/build/Build/Intermediates.noindex/AimPhone.build/Debug-iphoneos/AimPhone.build/Objects-normal/arm64/ContentView~partial.swiftmodule"
+  }
+}
