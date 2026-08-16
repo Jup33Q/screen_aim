@@ -1,5 +1,11 @@
 .build/
 .DS_Store
 *.xcuserdata
+xcuserdata/
+*.xcuserstate
 .swiftpm/
 release-artifacts/
+ios/build/
+__pycache__/
+*.pyc
+icons/ScreenAimLauncher.app/
