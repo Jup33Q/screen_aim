@@ -58,7 +58,8 @@ iPhone 相机对着 Mac 屏幕 → Mac 识别屏幕四角的 ArUco 标记 → �
 | 队列/上下文 | 跑什么 |
 |---|---|
 | `screenaim.sampler`（串行） | SCStream 帧回调 → `processBGRA`（检测→映射→滤波） |
-| `screenaim.server` / `screenaim.conn` | NWListener  accept 与读帧 |
+| `screenaim.server` / `screenaim.conn` | NWListener  accept 与读帧、控制帧内联分发 |
+| `screenaim.frames`（串行） | 手机视频帧的 `processJPEG`（识别慢于到达率时丢旧帧保最新） |
 | main runloop（Mac） | Calibrator 窗口、定时器、`onAim` 消费方 |
 | `aimphone.capture`（串行，iOS） | 采集回调、JPEG 编码、扫码识别、曝光/变焦/翻转配置 |
 | `@MainActor`（iOS） | GimbalManager 全部状态与事件分发、UI |

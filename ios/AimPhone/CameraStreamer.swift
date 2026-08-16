@@ -37,12 +37,11 @@ final class CameraStreamer: NSObject, ObservableObject {
     @Published var pairingQRVisibleOnMac = false  // Mac 端配对二维码当前是否可见（Mac 状态推送，protocol.md §6）
 
     /// 本机识别（iOS 端坐标转换测试）：与 Mac 端同一套 ScreenAimCore 代码。
-    /// 默认映射表对应 Mac 1728×1117 屏 + Calibrator 默认参数（24pt 标记 / 24pt 边距），
+    /// 默认映射表对应 Mac 1728×1117 屏 + Calibrator 默认参数（48pt 标记 / 24pt 边距），
     /// 8 项：四角 id0–3 + 四边中点 id4–7（冗余标记，ADR-007）；
     /// Mac 连上后会通过控制信道下发真实标定值覆盖（见 docs/protocol.md §6）
     let localizer = ScreenLocalizer()
     private var lastLocalizeTime: CFAbsoluteTime = 0
-    private var localizeCounter = 0
 
     let session = AVCaptureSession()
     private let videoQueue = DispatchQueue(label: "aimphone.capture")
@@ -121,13 +120,13 @@ final class CameraStreamer: NSObject, ObservableObject {
 
     override init() {
         super.init()
-        // 默认映射表：Calibrator 默认参数（markerSize 24 / inset 24）在 1728×1117 屏上的
-        // 8 个标记中心（m+s/2 = 36；W/2 = 864；H/2 = 558.5）
+        // 默认映射表：Calibrator 默认参数（markerSize 48 / inset 24，ADR-010）在 1728×1117 屏上的
+        // 8 个标记中心（m+s/2 = 48；W/2 = 864；H/2 = 558.5；上中标记的刘海偏移由 Mac 下发修正）
         localizer.screenCornerMap = [
-            0: CGPoint(x: 36, y: 36), 1: CGPoint(x: 1692, y: 36),
-            2: CGPoint(x: 1692, y: 1081), 3: CGPoint(x: 36, y: 1081),
-            4: CGPoint(x: 864, y: 36), 5: CGPoint(x: 1692, y: 558.5),
-            6: CGPoint(x: 864, y: 1081), 7: CGPoint(x: 36, y: 558.5),
+            0: CGPoint(x: 48, y: 48), 1: CGPoint(x: 1680, y: 48),
+            2: CGPoint(x: 1680, y: 1069), 3: CGPoint(x: 48, y: 1069),
+            4: CGPoint(x: 864, y: 48), 5: CGPoint(x: 1680, y: 558.5),
+            6: CGPoint(x: 864, y: 1069), 7: CGPoint(x: 48, y: 558.5),
         ]
         configureSession()
     }
@@ -345,7 +344,9 @@ final class CameraStreamer: NSObject, ObservableObject {
         retryCount = 0
         if let conn = connection, isConnected {
             // 先通知 Mac「手机主动断开」（protocol.md §7 disconnect），Mac 收到后
-            // 重新显示配对二维码并刷新为当前 IP；finalMessage 保证通知帧先于 FIN 发出
+            // 重新显示配对二维码并刷新为当前 IP；finalMessage 保证通知帧先于 FIN 发出。
+            // 断开前对鼠标键补发 up-all 兜底（§8，ADR-008）：防止按住中时断连导致 Mac 键卡死
+            sendControl(["type": "mouseUp", "button": "all"])
             sendControl(["type": "disconnect"])
             conn.send(content: nil, contentContext: .finalMessage, isComplete: true,
                       completion: .contentProcessed { _ in conn.cancel() })
@@ -458,8 +459,19 @@ extension CameraStreamer {
     }
 
     /// 横屏鼠标模拟器（protocol.md §8）：点击事件上报。button: "left" / "right" / "middle"
+    /// 旧协议保留给兼容路径；新 UI 用 sendMouseDown/Up 分离上报（支持拖拽）
     func sendMouseClick(_ button: String) {
         sendControl(["type": "mouseClick", "button": button])
+    }
+
+    /// 横屏鼠标模拟器（protocol.md §8）：按键按下上报（落指即发）
+    func sendMouseDown(_ button: String) {
+        sendControl(["type": "mouseDown", "button": button])
+    }
+
+    /// 横屏鼠标模拟器（protocol.md §8）：按键抬起上报；button="all" 为断开前兜底（对全部键补发抬起）
+    func sendMouseUp(_ button: String) {
+        sendControl(["type": "mouseUp", "button": button])
     }
 
     /// 横屏鼠标模拟器（protocol.md §8）：滚轮刻度上报，正 = 向上滚
@@ -488,26 +500,24 @@ extension CameraStreamer {
         }
         let detectedIds = result.markers.map { $0.id }.sorted()
         let missingIds = (0...7).filter { !detectedIds.contains($0) }   // 标记全集 = id0–7（ADR-007）
-        localizeCounter += 1
-        // 10ms 节流下每帧都识别，上报按 1/5 抽稀（≈20Hz），避免控制帧挤占视频带宽
-        if localizeCounter % 5 == 0 {
-            if let aim = result.aim {
-                print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d detected=%@ det=%.1fms",
-                             aim.x, aim.y, result.markers.count, 8,
-                             detectedIds.map(String.init).joined(separator: ","), detectMs))
-            } else if !missingIds.isEmpty {
-                print(String(format: "LOCALAIM 检出不足: detected=%@ missing=%@ det=%.1fms",
-                             "\(detectedIds)", "\(missingIds)", detectMs))
-            }
-            // 本机识别结果上报 Mac（含无瞄准点的空结果 + 各标记识别状态，便于离线分析缺哪个标记）
-            var msg: [String: Any] = ["type": "localAim",
-                                      "markers": result.markers.count,
-                                      "detected": detectedIds,
-                                      "missing": missingIds,
-                                      "detect_ms": detectMs]
-            if let aim = result.aim { msg["x"] = aim.x; msg["y"] = aim.y }
-            sendControl(msg)
+        // 每帧识别每帧上报（不抽稀，≈15Hz，ADR-009）：Mac 端白点覆盖层/debug 对照的流畅度
+        // 优先于控制信道流量（光标跟随走 Mac 侧视频帧识别，与本上报无关）
+        if let aim = result.aim {
+            print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d detected=%@ det=%.1fms",
+                         aim.x, aim.y, result.markers.count, 8,
+                         detectedIds.map(String.init).joined(separator: ","), detectMs))
+        } else if !missingIds.isEmpty {
+            print(String(format: "LOCALAIM 检出不足: detected=%@ missing=%@ det=%.1fms",
+                         "\(detectedIds)", "\(missingIds)", detectMs))
         }
+        // 本机识别结果上报 Mac（含无瞄准点的空结果 + 各标记识别状态，便于离线分析缺哪个标记）
+        var msg: [String: Any] = ["type": "localAim",
+                                  "markers": result.markers.count,
+                                  "detected": detectedIds,
+                                  "missing": missingIds,
+                                  "detect_ms": detectMs]
+        if let aim = result.aim { msg["x"] = aim.x; msg["y"] = aim.y }
+        sendControl(msg)
         // 数据采集（protocol.md §10）：录制中则抽帧落盘；到点自动 finish 并上传。
         // 注意此时 pb 仍持锁（本函数 defer 解锁），PNG 编码可以直接读
         captureRecorder.record(pb: pb, pts: timestamp, result: result, detectMs: detectMs)

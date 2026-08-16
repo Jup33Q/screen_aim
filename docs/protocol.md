@@ -47,9 +47,11 @@ IP 变化时 Mac 端每 5 秒自动重生成二维码；手机一连上，二维
 
 ## 5. 识别结果输出
 
-- Mac 端：映射结果 `print` + `onAim` 回调。产品化方向（见根 README 对照表）：
-  UDP/WebSocket 回传手机，或 `CGWarpMouseCursorPosition` 直接控鼠标
-- iPhone 端：本机识别结果通过 §7 `localAim` 控制帧上报 Mac（2Hz，debug 对照用）
+- Mac 端：映射结果 `print` + `onAim` 回调。`--calibrate --serve` 加 `--aim-cursor` 时
+  瞄准点（One Euro 滤波后的屏幕点坐标，与 Quartz 全局坐标系一致）直接
+  `CGWarpMouseCursorPosition` 绑定鼠标光标，钳制在屏内；与 §8 触控点击配合即
+  "手机瞄哪里点哪里"。产品化剩余方向（见根 README 对照表）：UDP/WebSocket 回传手机
+- iPhone 端：本机识别结果通过 §7 `localAim` 控制帧上报 Mac（每帧不抽稀，≈15Hz；debug 对照 + Mac 端白点显示用）
 
 ## 6. 标定映射表下发（Mac → iPhone，控制信道）
 
@@ -69,7 +71,7 @@ IP 变化时 Mac 端每 5 秒自动重生成二维码；手机一连上，二维
   冗余 8 标记（ADR-007）：id0–3 四角、id4–7 四边中点（上/右/下/左），任取 ≥4 个即可建单应；
   条目数随 Calibrator 布局自动扩展，格式本身不变
 - iPhone 端 `CameraStreamer.receiveControl/handleControl` 接收并写入 `ScreenLocalizer`
-- 收不到时（旧版 Mac）iPhone 用内置默认表（1728×1117 + 24pt 标记 + 24pt 边距，同为 8 项）
+- 收不到时（旧版 Mac）iPhone 用内置默认表（1728×1117 + 48pt 标记 + 24pt 边距，同为 8 项）
 - 旧版 iPhone 从不读反向数据，消息滞留连接缓冲区无影响，向后兼容；
   要求恰好 4 项的中间版本 iPhone 会忽略 8 项 calib 并沿用内置默认表（与 Mac 默认参数一致）
 
@@ -98,7 +100,7 @@ IP 变化时 Mac 端每 5 秒自动重生成二维码；手机一连上，二维
 下次有手机配对成功仍自动隐藏。Mac 端 `FrameServer.onControl` 分发，
 iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 
-第二种消息——**手机本机识别结果上报**（2Hz，与 LOCALAIM 日志同节奏）：
+第二种消息——**手机本机识别结果上报**（每帧不抽稀，≈15Hz，与 LOCALAIM 日志同节奏）：
 
 ```json
 {"type":"localAim","markers":6,"detected":[0,1,2,4,5,6],"missing":[3,7],
@@ -111,7 +113,8 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 - `x`/`y`：帧中心映射的屏幕点坐标（左上角原点），与手机端 `localAim` 同源
 - `detect_ms`：本帧检测+映射耗时（Phase 0 基线测量；旧客户端无此字段，Mac 端按 0 记录）
 - 用途：Mac 端 debug 对照（两端同帧各自识别，比对输出一致性）。Mac 端 `FrameServer.onControl`
-  打印，并实时显示在标定层底部胶囊 debug 标签（检出不足时变黄提示「缺定位码」）；
+  打印，实时显示在标定层底部胶囊 debug 标签（检出不足时变黄提示「缺定位码」），
+  并把 `x`/`y` 瞄准点渲染为屏幕上的白点覆盖层（无瞄准点/断连时隐藏）；
   **每条上报追加一行结构化日志**到 `scenes/localaim_<会话时间>.csv`
   （列：`timestamp,markers,ids,x,y,detect_ms,src`，无瞄准点时 `x,y` 留空，
   `src` 为来源通道，目前恒为 `tcp`），供离线统计识别成功率与轨迹
@@ -135,17 +138,30 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 事件经 §7 同一控制信道上报：
 
 ```json
-{"type":"mouseClick","button":"left"}
+{"type":"mouseDown","button":"left"}
+{"type":"mouseUp","button":"left"}
+{"type":"mouseUp","button":"all"}
 {"type":"mouseScroll","delta":2}
+{"type":"mouseClick","button":"left"}
 ```
 
-- `mouseClick`：`button` 为 `left` / `right` / `middle`（滚轮轻点 = 中键），
-  落指即发（与真实鼠标按下一致）；Mac 端 `postMouseClick` 在**当前光标位置**点击
+- **前置条件**：仅 `--calibrate --serve PORT`（手机推流）模式存在此链路；无参数
+  仅采样模式不起帧服务，手机连不上。Mac 端还需 系统设置 > 隐私与安全性 > 辅助功能
+  授权（启动时自动弹窗提示；未授权时 CGEvent 被系统静默丢弃，收到鼠标消息时打印一次性警告）
+- `mouseDown` / `mouseUp`：按下/抬起分离上报（落指发 down、抬指发 up），
+  `button` 为 `left` / `right` / `middle`；Mac 端 `postMouseDown/Up` 在**当前光标位置**
+  分次注入，按住期间移动光标即拖拽。快速点按 = down+up 紧邻到达，效果等价完整点击
+- `mouseUp` + `button:"all"`：断开兜底。iPhone 端 `disconnect()` 在发 `disconnect` 帧前
+  无条件补发；Mac 端对自行跟踪的按下键集合补发 up（对未按下的键收到 up 是安全 no-op）。
+  连接被动断流时 Mac 端 `FrameServer.onDisconnect` 同样补发，防止鼠标键卡死在按下态
 - `mouseScroll`：`delta` 为滚轮刻度（行）增量，正 = 向上滚（与手机端手指上滑同向）；
   滚轮竖拖每 14pt 累计一格上报一次；Mac 端 `postMouseScroll` 用 `CGEvent` 滚轮事件注入
-- 两种消息都要求 Mac 端在 系统设置 > 隐私与安全性 > 辅助功能 中授权
-  （否则 CGEvent 被系统静默丢弃）
-- 旧版 Mac 忽略未知 type，仅表现为触控层无实际效果，向后兼容
+- `mouseClick`：旧协议完整点击（按下+抬起一次注入），保留给旧 iPhone 客户端；
+  新版 iPhone 不再发送。Mac 端新旧消息都支持，双向向后兼容
+- **信号捕获日志**：每条鼠标事件追加一行到 `scenes/mouse_<会话时间>.csv`
+  （列：`timestamp,event,button,delta`，event ∈ down/up/click/scroll，
+  scroll 时 button 为空、delta 为刻度增量），并实时显示在标定层底部 debug 胶囊
+  （与 localAim 共用一行，≈15Hz 的 localAim 会自然刷新回来）
 
 ## 9. （保留）
 

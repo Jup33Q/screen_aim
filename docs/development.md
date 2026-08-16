@@ -8,7 +8,9 @@ brew install xcodegen        # iOS 工程生成
 swift build                  # Mac 端，Swift 6.x
 ```
 
-权限：Mac 端首次运行需 **系统设置 → 隐私与安全性 → 屏幕录制** 授权终端/Xcode。
+权限：Mac 端首次运行需 **系统设置 → 隐私与安全性 → 屏幕录制** 授权终端/Xcode；
+手机鼠标模拟（`--serve`，protocol.md §8）还需 **辅助功能** 授权（启动时自动弹窗，
+未授权则 CGEvent 被系统静默丢弃）。
 
 ## Mac 端验证清单
 
@@ -59,3 +61,38 @@ DockKit 行为**模拟器无法验证**；模拟器构建自动降级为空操�
 | 云台按键无反应 | 真机？iOS 17.4+？看云台 pill 下的调试事件历史 |
 | 屏幕条纹/过曝 | ADR-003：曝光是否被改回自动；亮度本质是 ISO 调节 |
 | `swift build` 找不到 OpenCV | `brew install opencv`；Intel Mac 需改 Package.swift 路径前缀 |
+
+## 发布流程（GitHub Release）
+
+`release-artifacts/` 已被 .gitignore 忽略，产物不进仓库。
+
+### macOS 端
+
+```bash
+swift build -c release        # 产物 .build/release/ScreenAim
+tar -czf release-artifacts/ScreenAim-macOS-arm64.tar.gz -C .build/release ScreenAim
+```
+
+二进制动态链接 Homebrew OpenCV，用户机需先 `brew install opencv`
+（路径硬编码 /opt/homebrew/opt/opencv，Apple Silicon）。
+
+### iOS 端
+
+```bash
+xcodebuild -project ios/AimPhone.xcodeproj -scheme AimPhone \
+  -configuration Release -destination 'generic/platform=iOS' \
+  -archivePath ios/build/AimPhone.xcarchive archive
+xcodebuild -exportArchive -archivePath ios/build/AimPhone.xcarchive \
+  -exportPath ios/build/ipa -exportOptionsPlist ios/build/ExportOptions.plist
+cp ios/build/ipa/AimPhone.ipa release-artifacts/AimPhone-iOS.ipa
+```
+
+development 签名，team 4VF7272J66（ExportOptions.plist 已固化，仅同团队机器可复现）。
+
+### 上传
+
+```bash
+gh release create vX.Y.Z \
+  release-artifacts/AimPhone-iOS.ipa \
+  release-artifacts/ScreenAim-macOS-arm64.tar.gz
+```

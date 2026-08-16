@@ -25,7 +25,7 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 
 | API | 说明 |
 |---|---|
-| `ArucoDetector` | 纯 Swift ArUco 检测（DICT_4X4_50 id0–7）：自适应阈值 + 连通域 + 字典匹配；亚像素角点精化（法向剖面 + TLS 直线拟合，`subpixelRefine` 可关）；`rejectHistogram` 拒绝原因计数（回放调参用） |
+| `ArucoDetector` | 纯 Swift ArUco 检测（DICT_4X4_50 id0–7）：自适应阈值 + 连通域 + 字典匹配；亚像素角点精化（法向剖面 + TLS 直线拟合，`subpixelRefine` 可关）；`maxCandidates` 候选解码上限（按像素数降序截断，防噪点拖垮 decode）；`rejectHistogram` 拒绝原因计数（回放调参用） |
 | `DetectedMarker` | 检测结果：`id` / `center` / `corners`（帧像素，左上原点） |
 | `Homography` | 3×3 单应：`init(src:dst:)` 四点 DLT；`init(ransacSrc:dst:thresholdPx:maxIter:)` RANSAC + Accelerate `dsyev_` 最小二乘精化（ADR-007） |
 | `ScreenLocalizer` | 检测→映射→滤波编排：`screenCornerMap` ≥4 项即可；输出侧内嵌 One Euro 滤波（`aimFilterEnabled` 可关，`aimFilterX/Y` 可调参） |
@@ -36,12 +36,13 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 
 | 类型/函数 | 说明 |
 |---|---|
-| `ScreenSampler` | 帧处理中枢：`start()` 起 SCStream；`processJPEG` / `processBGRA` 两条入口汇到同一检测映射管线（RANSAC 映射 + One Euro 输出滤波）；`screenCornerMap` 填 ≥4 个标记的屏幕坐标后输出 `onAim`；FPS 日志带 `det=xxms` 检测耗时 |
+| `ScreenSampler` | 帧处理中枢：`start()` 起 SCStream；`processJPEG` / `processBGRA` 两条入口汇到同一检测映射管线（RANSAC 映射 + One Euro 输出滤波）；`screenCornerMap` 填 ≥4 个标记的屏幕坐标后输出 `onAim`；`onMarkersDetected` 每帧回调检出标记 ID（标定层绿边的数据源）；FPS 日志带 `det=xxms` 检测耗时 |
 | `primaryIPv4()` | 本机主网卡 IPv4（优先 en0），配对二维码用 |
 | `makeQRImage` / `makeStyledQRImage` | 二维码 NSImage 生成（普通 / 小程序码圆点风格） |
-| `FrameServer` | TCP 帧服务 + Bonjour 发布；`onFrame` 交 JPEG，`onConnect` 通知已配对 |
+| `FrameServer` | TCP 帧服务 + Bonjour 发布；`onFrame` 交 JPEG，`onConnect` 通知已配对，`onControl` 内联分发控制消息（protocol.md §7/§8），`onDisconnect` 断连回调（鼠标键卡死兜底用，ADR-008） |
 | `CaptureServer` | 采集回传服务（protocol.md §10，servePort+1）：接收 iPhone 无损 PNG + 元数据，落盘 `scenes/capture_*/` |
-| `Calibrator` | 透明悬浮标定层：8 标记（4 角 + 4 边中点，自带白色底卡保证静区）、中央配对二维码、IP 变化看守、ESC 退出；`run()` 阻塞进主循环；localAim 写 `scenes/localaim_*.csv`（列含 detect_ms/src） |
+| `Calibrator` | 透明悬浮标定层：8 标记（4 角 + 4 边中点，自带白色底卡保证静区）、中央配对二维码、IP 变化看守、ESC 退出；`run()` 阻塞进主循环；`setMarkerActivation` 标记激活绿边、`markerAlpha` 白卡不透明度滑杆（0.4–1.0）、`aimDot` localAim 白点覆盖层、`aimCursor`（`--aim-cursor`）瞄准点绑光标；鼠标模拟器 `handleMouseButton` / `releaseStuckMouseButtons`（ADR-008）；localAim 写 `scenes/localaim_*.csv`（列含 detect_ms/src），鼠标事件写 `scenes/mouse_*.csv`（`logMouseEvent`，列 timestamp,event,button,delta） |
+| `postMouseDown/Up/Click/Scroll` | 鼠标模拟器事件注入（protocol.md §8）：当前光标位置 CGEvent 按下/抬起/点击/滚轮；需辅助功能授权，否则事件被系统静默丢弃 |
 
 命令行自检/基准：`--self-test`（OpenCV 管线，8 标记 + 遮挡模拟）、`--swift-self-test`
 （纯 Swift 管线同款判据）、`--swift-detect IMG [GT] [--verbose]`（双检测器对比）、
@@ -62,7 +63,8 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `startBrowsing()` | Bonjour 自动发现（主方案） |
 | `scanQRCode()` / `cancelScan()` | 主动扫码（5 秒窗口逐帧搜索）；未连接时也有 0.3s 间隔的被动扫码 |
 | `onScanned` | 扫码成功回调（UI 回填地址） |
-| `localizeFrame(_:timestamp:)` | 逐帧本机识别 + localAim 上报 + 采集抽帧入口 |
+| `localizeFrame(_:timestamp:)` | 逐帧本机识别 + localAim 每帧上报（不抽稀 ≈15Hz，ADR-009）+ 采集抽帧入口 |
+| `sendMouseDown/Up` / `sendMouseScroll` / `sendMouseClick` | 横屏鼠标模拟器上报（§8）：按下/抬起分离（`button:"all"` 为断连兜底，ADR-008）、滚轮刻度；`sendMouseClick` 为旧协议保留 |
 
 ### `CaptureRecorder.swift`
 
@@ -93,6 +95,7 @@ DockKit 云台适配层（`#if canImport(DockKit)` 守卫，模拟器全降级�
 | `controlPanel` | 顶部连接面板（已连接折叠为 pill） |
 | `gimbalPill` | 云台状态 + 扳机门控的按键功能图例 |
 | `Crosshair` / `ScanOverlay` / `CornerBrackets` | 瞄准十字 / 扫码遮罩 / 取景框角标 |
+| `MousePadOverlay` | 横屏鼠标模拟器触控层（§8）：左/右键落指发 down、抬指发 up（支持拖拽），滚轮竖拖逐格上报 + 轻点中键 down+up |
 | `View.glass*` 扩展 | Liquid Glass（iOS 26+）兼容封装，旧系统回退 ultraThinMaterial |
 
 ## 工作区内的过程文档

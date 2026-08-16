@@ -33,12 +33,13 @@ swift run ScreenAim --self-test
 swift run ScreenAim --make-markers ./markers
 
 # 3. 透明悬浮标定层（推荐）：8 个悬浮小标记（4 角 + 4 边中点），自动标定 + 实时输出瞄准坐标
-swift run ScreenAim --calibrate                          # 默认 24pt 标记
-swift run ScreenAim --calibrate --marker-size 48         # 距离远/光线差时调大
+swift run ScreenAim --calibrate                          # 默认 48pt 标记
+swift run ScreenAim --calibrate --marker-size 24         # 屏幕占位敏感时调小（识别距离会变近）
 swift run ScreenAim --calibrate --inset 40 --pad 12      # 可调边距/白卡边距
 
 # 4. 手机推流模式：TCP 收 JPEG 帧（配合 ios/AimPhone App）
 swift run ScreenAim --calibrate --serve 9100
+swift run ScreenAim --calibrate --serve 9100 --aim-cursor   # 追加：瞄准点绑定鼠标光标（手机瞄哪光标跟哪）
 
 # 5. 仅采样（手工填 screenCornerMap 时用）
 swift run ScreenAim
@@ -76,7 +77,7 @@ open ios/AimPhone.xcodeproj          # 打开后选择你的 Development Team，
 | 标记边长 | 命中率 | 瞄准点抖动 σ |
 |---|---|---|
 | 64pt | ~100% | < 0.1pt |
-| 24pt（默认） | ~100% | ≈ 0.05pt |
+| 24pt | ~100% | ≈ 0.05pt |
 | 20pt | ~0% → 见下注 | — |
 | 16pt | 0% | — |
 
@@ -100,7 +101,7 @@ open ios/AimPhone.xcodeproj          # 打开后选择你的 Development Team，
 | 标记检测 | `OpenCVBridge.detectMarkers` | 相同，可换 AprilTag 提高远距离鲁棒性 |
 | 坐标映射 | `OpenCVBridge.mapPointRANSAC`（冗余 8 标记 + RANSAC）+ One Euro 滤波 | 相同 |
 | 标定 UI | 全屏悬浮层 8 标记自动标定 | 相同 |
-| 坐标消费 | print | UDP/WebSocket 发给手机，或 `CGWarpMouseCursorPosition` 控制鼠标 |
+| 坐标消费 | print；`--calibrate --serve --aim-cursor` 时 `CGWarpMouseCursorPosition` 绑定光标 | UDP/WebSocket 发给手机 |
 
 ## 注意
 

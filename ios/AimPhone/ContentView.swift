@@ -221,7 +221,8 @@ struct ContentView: View {
 
                 // 横屏鼠标模拟器（protocol.md §8）：左键 / 滚轮 / 右键，贴底全幅，比例见 MousePadOverlay
                 if landscape && !streamer.scanning {
-                    MousePadOverlay(onClick: { streamer.sendMouseClick($0) },
+                    MousePadOverlay(onDown: { streamer.sendMouseDown($0) },
+                                    onUp: { streamer.sendMouseUp($0) },
                                     onScroll: { streamer.sendMouseScroll($0) })
                         .ignoresSafeArea()
                 }
@@ -485,7 +486,7 @@ struct ContentView: View {
             } else {
                 Text("本机识别中")
             }
-            Text("标记 \(streamer.localMarkerCount)/4 · \(streamer.calibSource)")
+            Text("标记 \(streamer.localMarkerCount)/8 · \(streamer.calibSource)")
         }
         .font(.system(.caption2, design: .monospaced))
         .foregroundStyle(.white)
@@ -733,11 +734,12 @@ struct Crosshair: View {
 // MARK: - 横屏鼠标模拟器触控层（protocol.md §8）
 /// 布局比例（按设计稿缩小版）：左右键各 22% 屏宽 × 19% 屏高，贴底部两角，内侧上角大圆角；
 /// 滚轮 14% 屏宽 × 34% 屏高，居中、底部与左右键对齐、明显高出，顶部双圆角。
-/// 交互：左/右键落指即点击（与真实鼠标按下一致，刚性触觉）；
-/// 滚轮竖拖逐格上报滚动（每 14pt 一格 + 刻度反馈），轻点滚轮 = 中键。
+/// 交互：左/右键落指发 down、抬指发 up（与真实鼠标一致，支持拖拽，刚性触觉）；
+/// 滚轮竖拖逐格上报滚动（每 14pt 一格 + 刻度反馈），轻点滚轮 = 中键 down+up。
 struct MousePadOverlay: View {
-    var onClick: (String) -> Void      // "left" / "right" / "middle"
-    var onScroll: (Int) -> Void        // 滚轮刻度增量，正 = 向上滚
+    var onDown: (String) -> Void        // "left" / "right" / "middle" 按下
+    var onUp: (String) -> Void          // 同键抬起
+    var onScroll: (Int) -> Void         // 滚轮刻度增量，正 = 向上滚
 
     @State private var leftDown = false
     @State private var rightDown = false
@@ -773,7 +775,7 @@ struct MousePadOverlay: View {
         UnevenRoundedRectangle(cornerRadii: .init(topLeading: topLeading, topTrailing: topTrailing))
     }
 
-    /// 左/右键：玻璃面 + 按下高亮；落指即触发点击（刚性触觉），抬指复位
+    /// 左/右键：玻璃面 + 按下高亮；落指发 down（刚性触觉），抬指发 up（支持拖拽）
     private func mouseButton(side: String, shape: UnevenRoundedRectangle,
                              pressed: Binding<Bool>) -> some View {
         Color.white.opacity(0.001)   // 透明命中底
@@ -796,16 +798,20 @@ struct MousePadOverlay: View {
                         guard !pressed.wrappedValue else { return }
                         pressed.wrappedValue = true
                         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-                        onClick(side)   // 按下即发，跟真实鼠标一致
+                        onDown(side)   // 落指即发 down，跟真实鼠标一致
                     }
-                    .onEnded { _ in pressed.wrappedValue = false }
+                    .onEnded { _ in
+                        guard pressed.wrappedValue else { return }
+                        pressed.wrappedValue = false
+                        onUp(side)     // 抬指发 up；快速点按 = down+up 紧邻，等价旧 click
+                    }
             )
             .animation(.easeInOut(duration: 0.12), value: pressed.wrappedValue)
     }
 
     private let btnLabelInset: CGFloat = 22
 
-    /// 滚轮：竖拖逐格滚动（刻度触觉），轻点 = 中键；拖动时玻璃面高亮
+    /// 滚轮：竖拖逐格滚动（刻度触觉），轻点 = 中键 down+up；拖动时玻璃面高亮
     private func scrollWheel(shape: UnevenRoundedRectangle) -> some View {
         Color.white.opacity(0.001)
             .glassPad(shape)
@@ -840,10 +846,11 @@ struct MousePadOverlay: View {
                         }
                     }
                     .onEnded { value in
-                        // 轻点（无位移）= 中键
+                        // 轻点（无位移）= 中键 down+up
                         if abs(value.translation.height) < 6 && abs(value.translation.width) < 6 {
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            onClick("middle")
+                            onDown("middle")
+                            onUp("middle")
                         }
                         wheelDragging = false
                     }

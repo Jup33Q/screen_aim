@@ -38,6 +38,10 @@ public final class ArucoDetector {
     public var outerRingMargin: Double = 10  // 外圈亮度必须超过格网阈值这么多
     public var minCellGap: Double = 25    // 36 格最小黑白间隙（模糊帧上白格可能只剩 ~180）
     public var subpixelRefine = true      // 亚像素角点精化开关（Phase 1.2；--replay A/B 用）
+    // 候选解码上限：按组件像素数降序截断。8 个真实标记通常是最干净的暗块，
+    // 复杂场景（桌面文字/图标噪点成百上千）只解前 N 个，长尾直接丢弃；
+    // decode 内部的边框环/外圈/字典校验会把混入的伪候选筛掉
+    public var maxCandidates = 32
     public var debugLog = false           // 打印候选拒绝原因（排错用）
     /// 拒绝原因直方图（--replay 汇总用；每次拒绝一次字典递增，成本可忽略）
     public private(set) var rejectHistogram: [String: Int] = [:]
@@ -81,8 +85,13 @@ public final class ArucoDetector {
         thresholdDark(w: w, h: h)
         if debugLog { lastDark = dark; lastSize = (w, h) }
         let comps = labelComponents(w: w, h: h)
+        // 候选数量上限（maxCandidates）：按像素数降序取前 N 个再逐个解码，
+        // 防止复杂桌面场景下成千上万个噪点组件拖垮逐候选 decode
+        let capped = comps.count > maxCandidates
+            ? Array(comps.sorted { $0.count > $1.count }.prefix(maxCandidates))
+            : comps
         var out: [DetectedMarker] = []
-        for c in comps {
+        for c in capped {
             if let m = decode(candidate: c, w: w, h: h) { out.append(m) }
         }
         return out.sorted { $0.id < $1.id }

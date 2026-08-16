@@ -1,6 +1,7 @@
 //
 //  main.swift
-//  ScreenAim（Mac 端）— 采集/接收帧 → ArUco 检测 → 单应映射 → 瞄准坐标输出
+//  ScreenAim（Mac 端）— 采集/接收帧 → ArUco 检测 → 单应映射 → 瞄准坐标输出；
+//  手机推流模式（--serve）含鼠标模拟：控制信道 → CGEvent 注入（protocol.md §8）
 //
 //  关键约束：像素处理全部在非主线程（screenaim.* 队列）；坐标系约定见 docs/architecture.md；
 //  四种运行模式互斥（--self-test / --make-markers / --calibrate / 仅采样）
@@ -59,6 +60,10 @@ final class ScreenSampler: NSObject, SCStreamOutput {
 
     // 检测到有效映射时回调（左上角原点，点坐标）
     var onAim: ((CGPoint) -> Void)?
+
+    /// 每帧检出标记 ID 回调（帧处理队列上调用，两种入口都会触发）：
+    /// 标定层定位码"激活"绿边的数据源
+    var onMarkersDetected: (([Int]) -> Void)?
 
     func start() async throws {
         let content = try await SCShareableContent.current
@@ -159,6 +164,7 @@ final class ScreenSampler: NSObject, SCStreamOutput {
             print(String(format: "marker id=%d center=(%.1f, %.1f)",
                          m.markerId, m.center.x, m.center.y))
         }
+        onMarkersDetected?(markers.map { Int($0.markerId) })
 
         // 匹配 ≥4 个已知标记 -> RANSAC 单应 -> 帧中心(瞄准点)映射到屏幕坐标（ADR-007：
         // 任一角被遮挡或单帧掉检时仍有输出，RANSAC 剔除个别错位点）
@@ -410,10 +416,11 @@ final class ActionSlider: NSSlider {
 }
 
 /// 定位码尺寸徽章：ZStack 语义 = 底层 SF Symbol 可变圆环（variable circle，
-/// 进度弧随 pt 值填充）+ 上层数值文本
+/// 进度弧随值填充）+ 上层数值文本。量程/后缀可配（pt 尺寸与 % 不透明度共用）
 final class SizeBadgeView: NSView {
     var value: Int = 16 { didSet { update() } }
-    private let minV = 16.0, maxV = 96.0
+    var minV = 16.0, maxV = 96.0
+    var suffix = ""
     private let ringView = NSImageView()
     private let label = NSTextField(labelWithString: "")
 
@@ -448,8 +455,8 @@ final class SizeBadgeView: NSView {
     private func update() {
         let t = (Double(value) - minV) / (maxV - minV)
         ringView.image = NSImage(systemSymbolName: "circle", variableValue: t,
-                                 accessibilityDescription: "定位码边长")
-        label.stringValue = "\(value)"
+                                 accessibilityDescription: "定位码参数")
+        label.stringValue = "\(value)\(suffix)"
         centerLabel()
     }
 }
@@ -497,6 +504,8 @@ final class FrameServer {
     var handshakePayload: (() -> Data?)?
     /// 手机端控制消息回调（长度字最高位置位的帧，protocol.md §7），参数为 JSON 对象
     var onControl: (([String: Any]) -> Void)?
+    /// 连接断开回调（主动/被动断开都会触发，protocol.md §8 鼠标按键卡死兜底用）
+    var onDisconnect: (() -> Void)?
     /// 监听器失败回调（主线程）。NOTE: EADDRINUSE 等绑定失败是异步经 stateUpdateHandler
     /// 上报的，start() 的 throw 捕不到；不处理的话 App 会继续显示配对二维码，
     /// 但扫码连的是占端口的老进程——屏幕上留下永远配不对的"僵尸二维码"
@@ -556,6 +565,7 @@ final class FrameServer {
     private func drop(_ conn: NWConnection) {
         activeConns.removeAll { $0 === conn }
         conn.cancel()
+        DispatchQueue.main.async { self.onDisconnect?() }
     }
 
     private func readHeader(_ conn: NWConnection) {
@@ -750,9 +760,14 @@ final class CaptureServer {
 /// - `run()` 阻塞进 NSApp 主循环，ESC 退出
 final class Calibrator: NSObject {
     var markerSize: CGFloat   // 标记边长（点），滑杆实时调整
+    /// 标记卡不透明度（0.4–1.0，顶部面板滑杆实时调整）：
+    /// 降低可减少视觉侵入；WARNING: 太低会压缩黑白对比度，识别率先受影响
+    var markerAlpha: CGFloat = 0.75
     let inset: CGFloat        // 标记中心距屏幕边缘的距离（点）
     let pad: CGFloat          // 白卡内边距（点），保证静区
     let servePort: UInt16?    // 非 nil：手机推流模式（不采本机屏幕）
+    /// --aim-cursor：识别输出的瞄准点直接绑定鼠标光标位置（CGWarpMouseCursorPosition）
+    let aimCursor: Bool
     var window: NSWindow?
     var qrCard: NSView?       // 配对二维码卡片（连接成功后隐藏）
     var qrHost: NSView?       // 二维码视觉容器（玻璃模块层 / 位图回退都加在这里）
@@ -765,8 +780,13 @@ final class Calibrator: NSObject {
     var captureLabel = ""
     var currentPayload = ""
     var debugLabel: NSTextField?  // 手机端本机识别结果（localAim）的悬浮 debug 文本
+    /// iPhone 数据流瞄准点白点覆盖层：位置完全来自 protocol.md §7 localAim 上报
+    /// （手机本机识别结果），与 Mac 端视频帧识别管线无关；无瞄准点/断连时隐藏
+    var aimDot: NSView?
     var centers: [CGPoint] = []        // 当前 8 个标记中心的屏幕点坐标（左上角原点）
     var markerCards: [NSView] = []     // 当前 8 块白卡视图（rebuildMarkers 重建）
+    /// 当前被识别到（激活）的标记 ID 集合：setMarkerActivation 增量比对，仅翻转项发动画
+    private var activeMarkerIDs: Set<Int> = []
     var screenW: CGFloat = 0           // 屏幕点尺寸（calib 负载用）
     var screenH: CGFloat = 0
 
@@ -775,6 +795,12 @@ final class Calibrator: NSObject {
     private var csvHandle: FileHandle?
     private let csvStamp = ISO8601DateFormatter().string(from: Date())
         .replacingOccurrences(of: ":", with: "-")
+
+    // 鼠标模拟器（protocol.md §8）：Mac 侧跟踪按下中的键，断开连接时补发 up 防止键卡死（ADR-008）；
+    // mouseCsvHandle 为信号捕获日志（scenes/mouse_<会话时间>.csv），首次写时创建
+    private var pressedMouseButtons: Set<String> = []
+    private var mouseCsvHandle: FileHandle?
+    private var mousePermWarned = false   // 辅助功能未授权的一次性警告去重
 
     /// 追加一条 localAim 记录到 scenes/localaim_<会话时间>.csv（onControl 在 conn 队列，加锁串行化）。
     /// 列：timestamp,markers,ids,x,y,detect_ms,src。ids 为本帧检出的标记 ID（如 "0|2"），
@@ -801,6 +827,84 @@ final class Calibrator: NSObject {
         let row = String(format: "%.3f,%d,%@,%@,%.1f,%@\n",
                          Date().timeIntervalSince1970, n, idStr, xy, detectMs, src)
         if let data = row.data(using: .utf8) { csvHandle?.write(data) }
+    }
+
+    /// 鼠标模拟器信号捕获日志（protocol.md §8）：每条事件追加一行到
+    /// scenes/mouse_<会话时间>.csv。列：timestamp,event,button,delta
+    /// （event ∈ down/up/click/scroll；scroll 时 button 为空、delta 为刻度增量）。
+    /// onControl 在 conn 队列，与 logLocalAim 共用 csvLock 串行化
+    func logMouseEvent(event: String, button: String, delta: Int) {
+        csvLock.lock(); defer { csvLock.unlock() }
+        if mouseCsvHandle == nil {
+            let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("scenes", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("mouse_\(csvStamp).csv")
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path,
+                                               contents: "timestamp,event,button,delta\n".data(using: .utf8))
+            }
+            mouseCsvHandle = FileHandle(forWritingAtPath: url.path)
+            mouseCsvHandle?.seekToEndOfFile()
+            if mouseCsvHandle != nil { print("鼠标信号日志: \(url.path)") }
+        }
+        let row = String(format: "%.3f,%@,%@,%d\n",
+                         Date().timeIntervalSince1970, event, button, delta)
+        if let data = row.data(using: .utf8) { mouseCsvHandle?.write(data) }
+    }
+
+    /// 辅助功能未授权的一次性警告（CGEvent 会被系统静默丢弃，不提示则排障无迹可寻）
+    private func warnIfMousePermissionMissing() {
+        guard !AXIsProcessTrusted(), !mousePermWarned else { return }
+        mousePermWarned = true
+        print("警告: 未授权辅助功能，鼠标点击/滚动将被系统静默丢弃"
+              + "（系统设置 > 隐私与安全性 > 辅助功能）")
+    }
+
+    /// 鼠标按下/抬起分发（onControl 在 conn 队列）：注入 CGEvent、维护按下键集合、
+    /// 写捕获日志、刷新 debug 标签。button == "all" 仅用于 up：对全部按下键补发抬起
+    /// （iPhone 断开连接前的兜底帧，protocol.md §8）。返回 false 表示消息字段非法
+    @discardableResult
+    func handleMouseButton(event: String, button: String) -> Bool {
+        guard ["left", "right", "middle"].contains(button)
+              || (event == "up" && button == "all") else { return false }
+        warnIfMousePermissionMissing()
+        if event == "down" {
+            postMouseDown(button)
+            csvLock.lock(); pressedMouseButtons.insert(button); csvLock.unlock()
+        } else {
+            if button == "all" {
+                csvLock.lock()
+                let stuck = pressedMouseButtons
+                pressedMouseButtons.removeAll()
+                csvLock.unlock()
+                for b in stuck { postMouseUp(b) }
+            } else {
+                postMouseUp(button)
+                csvLock.lock(); pressedMouseButtons.remove(button); csvLock.unlock()
+            }
+        }
+        logMouseEvent(event: event, button: button, delta: 0)
+        print("MOUSE \(event): \(button)")
+        DispatchQueue.main.async { [weak self] in
+            self?.debugLabel?.stringValue = "鼠标: \(button) \(event == "down" ? "按下" : "抬起")"
+            self?.debugLabel?.textColor = .white
+        }
+        return true
+    }
+
+    /// 连接断开兜底：对仍处按下状态的键补发 up，防止真实鼠标键卡死
+    /// （FrameServer.onDisconnect / 收到 disconnect 消息时调用）
+    func releaseStuckMouseButtons() {
+        csvLock.lock()
+        let stuck = pressedMouseButtons
+        pressedMouseButtons.removeAll()
+        csvLock.unlock()
+        for b in stuck {
+            postMouseUp(b)
+            logMouseEvent(event: "up", button: b, delta: 0)
+            print("MOUSE up: \(b)（连接断开兜底）")
+        }
     }
 
     /// 重建配对二维码视觉：macOS 26+ 用双折射率 Liquid Glass 模块层，旧系统回退位图
@@ -856,6 +960,12 @@ final class Calibrator: NSObject {
             cardView.wantsLayer = true
             cardView.layer?.backgroundColor = NSColor.white.cgColor
             cardView.layer?.cornerRadius = 4
+            // 激活描边：初始透明，被识别到时由 setMarkerActivation 描绿边
+            cardView.layer?.borderWidth = 2.5
+            cardView.layer?.borderColor = NSColor.clear.cgColor
+            // 半透化降低视觉侵入（真机用户反馈全白卡太刺眼）；
+            // 0.75 下白环对深色桌面仍 ~190 灰度，解码对比度余量充足
+            cardView.layer?.opacity = Float(markerAlpha)
             content.addSubview(cardView)
             let iv = NSImageView(frame: NSRect(x: pad, y: pad, width: s, height: s))
             iv.image = images[id]
@@ -863,8 +973,33 @@ final class Calibrator: NSObject {
             cardView.addSubview(iv)
             markerCards.append(cardView)
         }
+        // 重建（滑杆调尺寸）后恢复激活态：当前激活中的标记直接描绿边，不走动画
+        for i in activeMarkerIDs where i < markerCards.count {
+            markerCards[i].layer?.borderColor = NSColor.systemGreen.cgColor
+        }
         centers = newCenters
         return centers
+    }
+
+    /// 定位码激活边框（主线程调用）：被识别到的标记白卡描绿边（标的被激活），
+    /// 掉检的恢复透明；激活/失效的颜色变化走 10ms 渐变动画而非瞬时跳变。
+    /// 增量比对 activeMarkerIDs，仅状态翻转的卡发动画，避免每帧全量刷动画
+    func setMarkerActivation(_ ids: Set<Int>) {
+        guard ids != activeMarkerIDs else { return }
+        let green = NSColor.systemGreen.cgColor
+        let clear = NSColor.clear.cgColor
+        for (i, card) in markerCards.enumerated() {
+            let active = ids.contains(i)
+            guard active != activeMarkerIDs.contains(i), let layer = card.layer else { continue }
+            let target = active ? green : clear
+            let anim = CABasicAnimation(keyPath: "borderColor")
+            anim.fromValue = layer.presentation()?.borderColor ?? layer.borderColor
+            anim.toValue = target
+            anim.duration = 0.01   // 10ms 渐变（激活与失效同值）
+            layer.borderColor = target
+            layer.add(anim, forKey: "activationBorder")
+        }
+        activeMarkerIDs = ids
     }
 
     /// 当前标定映射表的 calib 控制帧（protocol.md §6）：握手下发与滑杆调整后广播共用。
@@ -883,11 +1018,13 @@ final class Calibrator: NSObject {
         return try? JSONSerialization.data(withJSONObject: payload)
     }
 
-    init(markerSize: CGFloat, inset: CGFloat, pad: CGFloat = 8, servePort: UInt16? = nil) {
+    init(markerSize: CGFloat, inset: CGFloat, pad: CGFloat = 8, servePort: UInt16? = nil,
+         aimCursor: Bool = false) {
         self.markerSize = markerSize
         self.inset = inset
         self.pad = pad
         self.servePort = servePort
+        self.aimCursor = aimCursor
     }
 
     func run() -> Never {
@@ -909,6 +1046,18 @@ final class Calibrator: NSObject {
 
         let W = f.width, H = f.height
         screenW = W; screenH = H
+        // 鼠标模拟器（protocol.md §8）只在手机推流模式（--serve）存在；
+        // 该模式下提前触发辅助功能授权弹窗，否则 CGEvent 注入会被系统静默丢弃
+        if servePort != nil {
+            if !AXIsProcessTrusted() {
+                let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+                _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+                print("提示: 手机鼠标模拟需授权辅助功能"
+                      + "（系统设置 > 隐私与安全性 > 辅助功能），未授权时点击/滚动无效")
+            }
+        } else {
+            print("提示: 未启用 --serve，手机无法连接；手机鼠标模拟需 --calibrate --serve PORT")
+        }
         // 8 个定位码（白色底卡 + ArUco 位图）；rebuildMarkers 同时刷新 self.centers
         if let content = win.contentView {
             rebuildMarkers(in: content, screen: screen)
@@ -969,6 +1118,10 @@ final class Calibrator: NSObject {
         let sampler = ScreenSampler()
         sampler.screenCornerMap = Dictionary(uniqueKeysWithValues:
             centers.enumerated().map { (Int32($0.offset), $0.element) })
+        // 定位码激活联动：每帧检出的标记 ID 集合 -> 白卡绿边（主线程更新，内部去重 + 渐变动画）
+        sampler.onMarkersDetected = { [weak self] ids in
+            DispatchQueue.main.async { self?.setMarkerActivation(Set(ids)) }
+        }
         if let port = servePort {
             // 手机推流模式：TCP 收 JPEG 帧 -> 检测
             do {
@@ -990,8 +1143,48 @@ final class Calibrator: NSObject {
                 win.contentView?.addSubview(dbgBg)
                 debugLabel = dbg
 
+                // iPhone 数据流瞄准点白点（protocol.md §7 localAim）：白底细黑边，
+                // 深浅桌面都可见；初始隐藏，收到首个有效瞄准点才显示
+                let dotD: CGFloat = 14
+                let dot = NSView(frame: NSRect(x: 0, y: 0, width: dotD, height: dotD))
+                dot.wantsLayer = true
+                dot.layer?.backgroundColor = NSColor.white.cgColor
+                dot.layer?.cornerRadius = dotD / 2
+                dot.layer?.borderWidth = 1.5
+                dot.layer?.borderColor = NSColor.black.withAlphaComponent(0.6).cgColor
+                dot.isHidden = true
+                win.contentView?.addSubview(dot)
+                aimDot = dot
+
+                // 帧处理解耦（识别慢于 15fps 到达率时丢旧帧保最新）：
+                // 此前 onFrame 在 conn 队列同步执行，识别一帧期间不收下一帧，
+                // TCP 缓冲积压 → 延迟累积、有效帧率远低于手机端。改为 busy 标志 +
+                // 独立队列：处理中时新到的视频帧直接丢弃（视频帧可丢；控制帧在
+                // FrameServer 内联分发，不受此影响）
+                let frameBusy = NSLock()
+                var frameInFlight = false
+                let frameQueue = DispatchQueue(label: "screenaim.frames")
                 let server = FrameServer(port: port) { [sampler] jpeg in
-                    sampler.processJPEG(jpeg)
+                    frameBusy.lock()
+                    if frameInFlight { frameBusy.unlock(); return }
+                    frameInFlight = true
+                    frameBusy.unlock()
+                    frameQueue.async {
+                        sampler.processJPEG(jpeg)
+                        frameBusy.lock(); frameInFlight = false; frameBusy.unlock()
+                    }
+                }
+                // 瞄准点绑定光标（--aim-cursor）：手机帧识别出的屏幕点直接 warp 鼠标，
+                // 与 §8 触控点击配合 = 手机瞄哪里点哪里。瞄准点是主屏点坐标（左上角原点），
+                // 与 Quartz 全局坐标系一致，直接传入；钳制在屏内防止单应外推甩飞光标
+                if aimCursor {
+                    sampler.onAim = { [weak self] pt in
+                        guard let self else { return }
+                        let clamped = CGPoint(x: min(max(pt.x, 0), self.screenW - 1),
+                                              y: min(max(pt.y, 0), self.screenH - 1))
+                        CGWarpMouseCursorPosition(clamped)
+                    }
+                    print("瞄准点已绑定鼠标光标（--aim-cursor），手机瞄哪里光标跟哪里")
                 }
                 // 标定映射表下发：手机本机识别测试用，内容与 screenCornerMap 同源；
                 // 滑杆调整标记大小后 centers 会变，这里始终读最新值
@@ -1010,19 +1203,29 @@ final class Calibrator: NSObject {
                 server.onConnect = {
                     setQRVisible(false)   // 配对成功，隐藏二维码并广播状态
                 }
+                // 连接断开（主动/被动统一，§8）：按住中的鼠标键补发 up，防键卡死
+                server.onDisconnect = { [weak self] in
+                    self?.releaseStuckMouseButtons()
+                    self?.setMarkerActivation([])   // 帧流中断，绿边全部失效
+                }
 
-                // Mac 端配对码开关 + 退出应用按钮 + 采集按钮 + 定位码大小滑杆：主覆盖层点击穿透，
-                // 所以单独用一个可点击的悬浮 NSPanel（屏幕顶部居中）
+                // Mac 端配对码开关 + 退出应用按钮 + 采集按钮 + 定位码大小/不透明度滑杆 + 隐藏 UI 按钮：
+                // 主覆盖层点击穿透，所以单独用一个可点击的悬浮 NSPanel（屏幕顶部居中）
                 let qrBtnW: CGFloat = 52, closeBtnW: CGFloat = 52, recBtnW: CGFloat = 52, btnGap: CGFloat = 8
                 let sliderW: CGFloat = 210   // 滑杆胶囊（滑杆 + 数值标签）
+                let alphaW: CGFloat = 170    // 不透明度滑杆胶囊（同布局，略窄）
+                let eyeBtnW: CGFloat = 52    // 隐藏 UI 按钮胶囊
                 let panelH: CGFloat = 44
-                let panelW = qrBtnW + closeBtnW + recBtnW + btnGap * 3 + sliderW
-                // 避开刘海/菜单栏安全区，并额外下移 64pt：
-                // WARNING: 上中标记 id4 的白卡占距顶 16–56pt（ADR-007 边中点布局），
-                // 面板若贴在安全区下沿会正好压住它（外接屏 safeTop=0 时全压）
+                let panelW = qrBtnW + closeBtnW + recBtnW + btnGap * 5 + sliderW + alphaW + eyeBtnW
+                // 面板上沿动态贴在上中标记 id4 白卡下沿 + 8pt：
+                // 白卡占距顶 (safeTop+inset-pad) ~ (safeTop+inset+markerSize+pad)，
+                // 固定偏移在标记调大后必然遮挡（真机 70pt 实测复现），尺寸滑杆回调里同步 reposition
                 let safeTop = screen.safeAreaInsets.top
+                let panelTopFromTop = { [weak self] () -> CGFloat in
+                    safeTop + (self?.inset ?? 24) + (self?.markerSize ?? 48) + (self?.pad ?? 8) + 8
+                }
                 let btnPanel = NSPanel(contentRect: NSRect(x: W / 2 - panelW / 2,
-                                                           y: H - safeTop - panelH - 8 - 64,
+                                                           y: H - panelTopFromTop() - panelH,
                                                            width: panelW, height: panelH),
                                        styleMask: [.borderless, .nonactivatingPanel],
                                        backing: .buffered, defer: false)
@@ -1031,6 +1234,8 @@ final class Calibrator: NSObject {
                 btnPanel.backgroundColor = .clear
                 btnPanel.hasShadow = false
                 btnPanel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+                // 所有胶囊底卡登记在 capsules，隐藏 UI 时统一隐去（恢复胶囊单独管理）
+                var capsules: [NSView] = []
                 // 每个按钮各一块胶囊底卡
                 func makeBtnBg(x: CGFloat, w: CGFloat) -> NSView {
                     let bg = NSView(frame: NSRect(x: x, y: 0, width: w, height: panelH))
@@ -1038,6 +1243,7 @@ final class Calibrator: NSObject {
                     bg.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
                     bg.layer?.cornerRadius = panelH / 2
                     btnPanel.contentView?.addSubview(bg)
+                    capsules.append(bg)
                     return bg
                 }
                 // SF Symbol 图标按钮（无文字）
@@ -1127,6 +1333,9 @@ final class Calibrator: NSObject {
                     if let content = win.contentView {
                         self.rebuildMarkers(in: content, screen: screen)
                     }
+                    // 标记高度变了，面板跟随下移，始终贴在 id4 白卡下沿之下
+                    btnPanel.setFrameOrigin(NSPoint(x: btnPanel.frame.minX,
+                                                    y: H - panelTopFromTop() - panelH))
                     sampler.screenCornerMap = Dictionary(uniqueKeysWithValues:
                         self.centers.enumerated().map { (Int32($0.offset), $0.element) })
                     if let data = self.calibPayload(),
@@ -1136,22 +1345,134 @@ final class Calibrator: NSObject {
                     sizeBadge.value = tick
                     print("定位码大小: \(tick)pt（滑杆调整，新标定表已广播）")
                 }
+                // 定位码不透明度滑杆：与尺寸滑杆同一套交互（5% 刻度轻敲 + 50/75/100% 吸附对位震感）。
+                // 只改既有白卡 layer.opacity，无需重建标记；标定表与不透明度无关，不下发
+                let alphaBg = makeBtnBg(x: qrBtnW + closeBtnW + recBtnW + btnGap * 3 + sliderW + btnGap,
+                                        w: alphaW)
+                let alphaSlider = ActionSlider(frame: NSRect(x: 10, y: 8, width: 104, height: 28))
+                alphaSlider.minValue = 0.4   // 下限 0.4：再低白环对比度不足，识别率先崩
+                alphaSlider.maxValue = 1.0
+                alphaSlider.doubleValue = Double(markerAlpha)
+                alphaSlider.toolTip = "定位码不透明度（40–100%）：调低更不显眼，但太低会影响识别"
+                alphaBg.addSubview(alphaSlider)
+                let alphaBadge = SizeBadgeView(frame: NSRect(x: 118, y: 0, width: alphaW - 118 - 8,
+                                                             height: panelH))
+                alphaBadge.minV = 40; alphaBadge.maxV = 100; alphaBadge.suffix = "%"
+                alphaBadge.value = Int((markerAlpha * 100).rounded())
+                alphaBadge.toolTip = alphaSlider.toolTip
+                alphaBg.addSubview(alphaBadge)
+                let alphaDetents: [Double] = [0.5, 0.75, 1.0]
+                var lastAlphaTick = Int((markerAlpha * 20).rounded())
+                var lastAlphaDetent = alphaDetents.contains(Double(markerAlpha))
+                    ? Int(markerAlpha * 100) : -1
+                alphaSlider.onChange = { [weak self] v in
+                    guard let self else { return }
+                    // 吸附：距档位 ≤2% 时吸到档位
+                    var snapped = v
+                    var hitDetent = -1
+                    for d in alphaDetents where abs(v - d) <= 0.02 {
+                        snapped = d; hitDetent = Int(d * 100)
+                    }
+                    let tick = Int((snapped * 20).rounded())   // 5% 粒度
+                    if tick != lastAlphaTick {
+                        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                        lastAlphaTick = tick
+                    }
+                    if hitDetent >= 0 && hitDetent != lastAlphaDetent {
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                    }
+                    lastAlphaDetent = hitDetent
+                    let alpha = CGFloat(tick) / 20
+                    guard alpha != self.markerAlpha else { return }
+                    self.markerAlpha = alpha
+                    for card in self.markerCards { card.layer?.opacity = Float(alpha) }
+                    alphaBadge.value = Int((alpha * 100).rounded())
+                    print("定位码不透明度: \(Int((alpha * 100).rounded()))%（滑杆调整）")
+                }
+                // 隐藏 UI：全部胶囊隐去，原位留一个更淡的 eye.slash 恢复胶囊（与 iPhone 端眼睛按钮同语义）
+                let eyeBg = makeBtnBg(x: qrBtnW + closeBtnW + recBtnW + btnGap * 4 + sliderW + alphaW + btnGap,
+                                      w: eyeBtnW)
+                let eyeBtn = makeSymbolButton(symbol: "eye", tint: .white,
+                                              tooltip: "隐藏面板（原位留恢复按钮）", bg: eyeBg)
+                let restoreBg = NSView(frame: eyeBg.frame)
+                restoreBg.wantsLayer = true
+                restoreBg.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.3).cgColor
+                restoreBg.layer?.cornerRadius = panelH / 2
+                btnPanel.contentView?.addSubview(restoreBg)
+                let restoreBtn = ActionButton(frame: restoreBg.bounds)
+                let restoreCfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+                restoreBtn.image = NSImage(systemSymbolName: "eye.slash",
+                                           accessibilityDescription: "显示面板")?
+                    .withSymbolConfiguration(restoreCfg)
+                restoreBtn.title = ""
+                restoreBtn.imagePosition = .imageOnly
+                restoreBtn.contentTintColor = NSColor.white.withAlphaComponent(0.85)
+                restoreBtn.toolTip = "显示面板"
+                restoreBg.addSubview(restoreBtn)
+                restoreBg.isHidden = true
+                // 隐藏/恢复过渡：100ms 淡出淡入（10ms 在 60fps 下仅 1 帧，等于没有过渡）；
+                // 隐藏时恢复胶囊从眼睛按钮原位滑到面板横向居中
+                let hideAnim: TimeInterval = 0.1
+                let restoreCenterFrame = NSRect(x: panelW / 2 - eyeBtnW / 2, y: 0,
+                                                width: eyeBtnW, height: panelH)
+                eyeBtn.onClick = {
+                    restoreBg.frame = eyeBg.frame
+                    restoreBg.alphaValue = 0
+                    restoreBg.isHidden = false
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = hideAnim
+                        capsules.forEach { $0.animator().alphaValue = 0 }
+                        restoreBg.animator().alphaValue = 1
+                        restoreBg.animator().frame = restoreCenterFrame
+                    }, completionHandler: {
+                        capsules.forEach { $0.isHidden = true }
+                    })
+                }
+                restoreBtn.onClick = {
+                    capsules.forEach { $0.isHidden = false }
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = hideAnim
+                        capsules.forEach { $0.animator().alphaValue = 1 }
+                        restoreBg.animator().alphaValue = 0
+                        restoreBg.animator().frame = eyeBg.frame
+                    }, completionHandler: {
+                        restoreBg.isHidden = true
+                    })
+                }
                 btnPanel.orderFrontRegardless()
                 objc_setAssociatedObject(win, "btnPanel", btnPanel, .OBJC_ASSOCIATION_RETAIN)
                 // 手机端控制消息（protocol.md §7/§8）：配对二维码开关 / 本机识别结果上报 / 鼠标模拟器
                 server.onControl = { [weak self] msg in
                     switch msg["type"] as? String {
-                    case "mouseClick":
-                        // 横屏鼠标模拟器（§8）：在当前光标位置点击（需辅助功能权限）
+                    case "mouseDown", "mouseUp":
+                        // 横屏鼠标模拟器（§8）：按下/抬起分离注入，支持拖拽；
+                        // button=="all" 的 up 是 iPhone 断开前的兜底帧
                         guard let button = msg["button"] as? String else { break }
+                        let event = (msg["type"] as? String) == "mouseDown" ? "down" : "up"
+                        self?.handleMouseButton(event: event, button: button)
+                    case "mouseClick":
+                        // 旧协议（§8）：在当前光标位置完整点击一次（需辅助功能权限）
+                        guard let button = msg["button"] as? String else { break }
+                        self?.warnIfMousePermissionMissing()
                         postMouseClick(button)
+                        self?.logMouseEvent(event: "click", button: button, delta: 0)
                         print("MOUSE click: \(button)")
+                        DispatchQueue.main.async { [weak self] in
+                            self?.debugLabel?.stringValue = "鼠标: \(button) 点击"
+                            self?.debugLabel?.textColor = .white
+                        }
                     case "mouseScroll":
                         // 横屏鼠标模拟器（§8）：滚轮刻度，正 = 向上滚
                         let delta = msg["delta"] as? Int ?? 0
                         if delta != 0 {
+                            self?.warnIfMousePermissionMissing()
                             postMouseScroll(delta)
+                            self?.logMouseEvent(event: "scroll", button: "", delta: delta)
                             print("MOUSE scroll: \(delta)")
+                            DispatchQueue.main.async { [weak self] in
+                                self?.debugLabel?.stringValue = "鼠标: 滚动 \(delta > 0 ? "↑" : "↓")\(abs(delta)) 格"
+                                self?.debugLabel?.textColor = .white
+                            }
                         }
                     case "togglePairingQR":
                         DispatchQueue.main.async {
@@ -1160,7 +1481,10 @@ final class Calibrator: NSObject {
                     case "disconnect":
                         // 手机主动断开（protocol.md §7）：立即把二维码刷新为当前 IP 并重新显示，等待下一次配对
                         print("手机已断开，重新显示配对二维码")
+                        self?.releaseStuckMouseButtons()   // §8：按住中断连，补发 up 防键卡死
                         DispatchQueue.main.async {
+                            self?.aimDot?.isHidden = true   // 数据流中断，白点隐藏
+                            self?.setMarkerActivation([])   // 绿边全部失效
                             self?.refreshQRNow?()
                             setQRVisible(true)
                         }
@@ -1181,6 +1505,16 @@ final class Calibrator: NSObject {
                             DispatchQueue.main.async { [weak self] in
                                 self?.debugLabel?.stringValue = text
                                 self?.debugLabel?.textColor = .white
+                                // 白点直接取 iPhone 数据流的瞄准点（全精度 Double，非 debug 取整值）；
+                                // 屏幕点坐标左上角原点 → AppKit 左下角原点，y 翻转；钳制在屏内
+                                if let dot = self?.aimDot {
+                                    let d = dot.frame.width
+                                    let cx = min(max(CGFloat(x), 0), W - 1)
+                                    let cy = min(max(CGFloat(y), 0), H - 1)
+                                    dot.frame = NSRect(x: cx - d / 2, y: H - cy - d / 2,
+                                                       width: d, height: d)
+                                    dot.isHidden = false
+                                }
                             }
                         } else {
                             let missStr = missing.map(String.init).joined(separator: ",")
@@ -1192,6 +1526,7 @@ final class Calibrator: NSObject {
                             DispatchQueue.main.async { [weak self] in
                                 self?.debugLabel?.stringValue = "iPhone 瞄准: 缺定位码 [\(missStr)]（检出 \(n)/8）"
                                 self?.debugLabel?.textColor = .systemYellow
+                                self?.aimDot?.isHidden = true   // 无瞄准点，白点隐藏
                             }
                         }
                     default:
@@ -1682,9 +2017,10 @@ if CommandLine.arguments.contains("--make-markers") {
 
 if CommandLine.arguments.contains("--calibrate") {
     setbuf(stdout, nil)
-    // 标记边长（点），默认 24pt（Retina 48 物理像素）——实测可靠下限
-    // 更大更稳：手机距离远或光线差时可调大，如 --marker-size 48
-    var size: CGFloat = 24
+    // 标记边长（点），默认 48pt（ADR-010）：24pt 是 1280 宽降采样本机采屏的实测可靠下限，
+    // 但手机远距离实测中边中点标记掉检严重（真机验证 48pt 检出 >6/8）；
+    // 识别不稳仍可调大，如 --marker-size 64
+    var size: CGFloat = 48
     if let i = CommandLine.arguments.firstIndex(of: "--marker-size"),
        CommandLine.arguments.count > i + 1,
        let v = Double(CommandLine.arguments[i + 1]), v >= 16 {
@@ -1709,8 +2045,11 @@ if CommandLine.arguments.contains("--calibrate") {
        let v = UInt16(CommandLine.arguments[i + 1]) {
         servePort = v
     }
+    // --aim-cursor: 手机帧识别出的瞄准点直接绑定鼠标光标位置（protocol.md §5）
+    let aimCursor = CommandLine.arguments.contains("--aim-cursor")
     // 顶层全局强引用持有 Calibrator，保证滑杆/按钮闭包里的 weak self 在整个生命周期有效
-    let calibrator = Calibrator(markerSize: size, inset: inset, pad: pad, servePort: servePort)
+    let calibrator = Calibrator(markerSize: size, inset: inset, pad: pad, servePort: servePort,
+                                aimCursor: aimCursor)
     calibrator.run()  // 阻塞
 }
 
@@ -1735,20 +2074,36 @@ Task {
 }
 
 // MARK: - 鼠标模拟器事件注入（protocol.md §8，横屏触控层 → 本机光标）
-/// 在当前光标位置点击一次。button: "left" / "right" / "middle"
-/// 需 系统设置 > 隐私与安全性 > 辅助功能 授权，否则事件被系统静默丢弃
-func postMouseClick(_ button: String) {
-    guard let pos = CGEvent(source: nil)?.location else { return }
-    let (downType, upType, cgButton): (CGEventType, CGEventType, CGMouseButton)
+/// button 字符串 → CGEvent 类型映射（"left" / "right" / "middle"）
+private func mouseEventTypes(_ button: String) -> (CGEventType, CGEventType, CGMouseButton) {
     switch button {
-    case "right":  (downType, upType, cgButton) = (.rightMouseDown, .rightMouseUp, .right)
-    case "middle": (downType, upType, cgButton) = (.otherMouseDown, .otherMouseUp, .center)
-    default:       (downType, upType, cgButton) = (.leftMouseDown, .leftMouseUp, .left)
+    case "right":  return (.rightMouseDown, .rightMouseUp, .right)
+    case "middle": return (.otherMouseDown, .otherMouseUp, .center)
+    default:       return (.leftMouseDown, .leftMouseUp, .left)
     }
+}
+
+/// 在当前光标位置按下指定键（不弹起，配合 postMouseUp 支持拖拽）。
+/// 需 系统设置 > 隐私与安全性 > 辅助功能 授权，否则事件被系统静默丢弃
+func postMouseDown(_ button: String) {
+    guard let pos = CGEvent(source: nil)?.location else { return }
+    let (downType, _, cgButton) = mouseEventTypes(button)
     CGEvent(mouseEventSource: nil, mouseType: downType, mouseCursorPosition: pos, mouseButton: cgButton)?
         .post(tap: .cghidEventTap)
+}
+
+/// 在当前光标位置抬起指定键
+func postMouseUp(_ button: String) {
+    guard let pos = CGEvent(source: nil)?.location else { return }
+    let (_, upType, cgButton) = mouseEventTypes(button)
     CGEvent(mouseEventSource: nil, mouseType: upType, mouseCursorPosition: pos, mouseButton: cgButton)?
         .post(tap: .cghidEventTap)
+}
+
+/// 在当前光标位置点击一次（旧协议 mouseClick，向后兼容）。button: "left" / "right" / "middle"
+func postMouseClick(_ button: String) {
+    postMouseDown(button)
+    postMouseUp(button)
 }
 
 /// 滚轮滚动。delta 为刻度（行）数，正 = 向上滚（与手机端手指上滑同向）
