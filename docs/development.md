@@ -89,6 +89,11 @@ cp ios/build/ipa/AimPhone.ipa release-artifacts/AimPhone-iOS.ipa
 
 development 签名，team 4VF7272J66（ExportOptions.plist 已固化，仅同团队机器可复现）。
 
+WARNING: 若 xcode-select 指向 CommandLineTools（`xcode-select -p` 显示
+/Library/Developer/CommandLineTools），xcodebuild 会报 "requires Xcode"，
+需前置 `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
+（实测 2026-08 v0.2.0 构建即此情况；不改系统 xcode-select）。
+
 ### 上传
 
 ```bash
