@@ -3,11 +3,12 @@
 //  ScreenAimCore — 纯 Swift ArUco（DICT_4X4_50）标记检测器，零第三方依赖
 //
 //  管线：BGRA → 灰度 → 自适应阈值（积分图均值-C）→ 黑色连通域（two-pass union-find）
-//        → 四边形候选（组件在 ±45° 方向的极值点即凸四边形四角）→ 单应矫正采样 6×6 格
-//        → Otsu 分离黑白 → 边框环校验 + 字典 4 旋转匹配
+//        → 四边形候选（组件在 ±45° 方向的极值点即凸四边形四角）
+//        → 亚像素角点精化（法向剖面 + TLS 直线拟合，Phase 1.2）
+//        → 单应矫正采样 6×6 格 → 排序最大间隙阈值 → 边框环校验 + 字典 4 旋转匹配
 //
 //  与 Mac 端 OpenCV 管线的取舍：
-//  - 不做亚像素角点精化：角点来自组件极值像素，中心误差 ≤ ~0.7px（1280 宽帧）
+//  - 亚像素精化用自研法向剖面法（OpenCV 是 CORNER_REFINE_SUBPIX），中心误差 ~0.2px 级
 //  - 用"组件外圈必须亮"替代 OpenCV 的轮廓层级校验，拒绝并入暗背景的候选
 //  线程约定：非线程安全，调用方需在串行队列使用（AimPhone: aimphone.capture）
 //
@@ -308,6 +309,12 @@ public final class ArucoDetector {
             dlog("fill=\(String(format: "%.2f", fill)) count=\(c.count) quadArea=\(Int(quadArea))"); return nil
         }
 
+        // 亚像素角点精化（Phase 1.2）：法向剖面 + TLS 直线拟合。
+        // NOTE: 极值角点来自暗组件像素中心，系统性偏内 ~0.5px，精化同时修正该偏移；
+        // 小标记（帧上 <20px）角点偏 1px 就会把 6×6 格采样压到边框环上导致解码失败，
+        // 这是 20pt 远距标记命中率低的主因之一
+        pts = refineCorners(pts, w: w, h: h)
+
         // 单应：规范 6×6 格坐标 → 图像四边形（corners 顺序一致，采样结果只差整体旋转）
         guard let H = Homography(src: [CGPoint(x: 0, y: 0), CGPoint(x: 6, y: 0),
                                        CGPoint(x: 6, y: 6), CGPoint(x: 0, y: 6)],
@@ -361,6 +368,81 @@ public final class ArucoDetector {
         let center = CGPoint(x: pts.reduce(0) { $0 + $1.x } / 4,
                              y: pts.reduce(0) { $0 + $1.y } / 4)
         return DetectedMarker(id: hit.id, center: center, corners: pts)
+    }
+
+    // MARK: - 8. 亚像素角点精化（法向剖面 + TLS 直线拟合）
+    /// 对四边各取 12 个采样点，沿边法向 ±halfNorm 双线性采灰度，梯度最大位置做
+    /// 加权质心得亚像素边缘点；每边 12 点 TLS（总体最小二乘）直线拟合，
+    /// 相邻直线求交得精化角点。任何一步不可靠都回退原角点，保证不劣化。
+    private func refineCorners(_ pts: [CGPoint], w: Int, h: Int) -> [CGPoint] {
+        struct Line { var p: CGPoint; var d: CGPoint }   // 直线上一点 + 单位方向
+        var lines: [Line] = []
+        for i in 0..<4 {
+            let a = pts[i], b = pts[(i + 1) % 4]
+            let len = hypot(b.x - a.x, b.y - a.y)
+            guard len >= minSide else { return pts }
+            let dir = CGPoint(x: (b.x - a.x) / len, y: (b.y - a.y) / len)
+            let nrm = CGPoint(x: -dir.y, y: dir.x)
+            let halfNorm = min(5.0, len / 4)      // 小标记收窄法向范围，避免采到对侧边
+            let kMax = max(3, Int(halfNorm.rounded()))
+            var edgePts: [CGPoint] = []
+            for s in 0..<12 {
+                let t = 0.2 + 0.6 * Double(s) / 11   // 避开角点区（角部剖面不干净）
+                let px = a.x + (b.x - a.x) * t, py = a.y + (b.y - a.y) * t
+                // 法向灰度剖面（2·kMax+1 点，复用双线性采样）
+                var prof = [Double](repeating: 0, count: 2 * kMax + 1)
+                for k in 0...(2 * kMax) {
+                    let off = halfNorm * Double(k - kMax) / Double(kMax)
+                    prof[k] = sampleGray(x: px + nrm.x * off, y: py + nrm.y * off, w: w, h: h)
+                }
+                // 中心差分梯度：取**离剖面中心最近**的强峰——剖面中心在极值点连边上，
+                // 真外缘距中心 ≤~1px； WARNING: 不能取全局最大峰，边框环内侧的白格
+                // 在 ±5px 剖面内会造成第二处过渡，取错会把边拟到标记内部一格
+                var grad = [Double](repeating: 0, count: prof.count)
+                for k in 1..<(prof.count - 1) { grad[k] = abs(prof[k + 1] - prof[k - 1]) }
+                var kPeak = -1
+                for k in 1..<(prof.count - 1) where grad[k] > 12 {
+                    if kPeak < 0 || abs(k - kMax) < abs(kPeak - kMax) { kPeak = k }
+                }
+                guard kPeak > 0 else { continue }   // 无清晰边缘（模糊/噪声），弃用该采样点
+                // 峰值 ±1 邻域按梯度加权质心 → 亚像素边缘位置
+                var wsum = 0.0, ksum = 0.0
+                for k in max(1, kPeak - 1)...min(prof.count - 2, kPeak + 1) {
+                    wsum += grad[k]
+                    ksum += grad[k] * Double(k)
+                }
+                guard wsum > 0 else { continue }
+                let off = halfNorm * (ksum / wsum - Double(kMax)) / Double(kMax)
+                edgePts.append(CGPoint(x: px + nrm.x * off, y: py + nrm.y * off))
+            }
+            guard edgePts.count >= 6 else { return pts }   // 有效剖面太少，整体回退
+            // TLS 直线拟合：方向 = 协方差阵主特征向量（2×2 闭式解）
+            let n = Double(edgePts.count)
+            let mx = edgePts.reduce(0.0) { $0 + $1.x } / n
+            let my = edgePts.reduce(0.0) { $0 + $1.y } / n
+            var sxx = 0.0, syy = 0.0, sxy = 0.0
+            for p in edgePts {
+                let dx = p.x - mx, dy = p.y - my
+                sxx += dx * dx; syy += dy * dy; sxy += dx * dy
+            }
+            guard sxx + syy > 1e-9 else { return pts }   // 边缘点退化重合
+            let theta = 0.5 * atan2(2 * sxy, sxx - syy)
+            lines.append(Line(p: CGPoint(x: mx, y: my),
+                              d: CGPoint(x: cos(theta), y: sin(theta))))
+        }
+        // 相邻直线求交得角点：角 i = 边(i-1) ∩ 边(i)
+        var refined: [CGPoint] = []
+        for i in 0..<4 {
+            let l1 = lines[(i + 3) % 4], l2 = lines[i]
+            let cross = l1.d.x * l2.d.y - l1.d.y * l2.d.x
+            guard abs(cross) > 1e-6 else { return pts }   // 平行退化，整体回退
+            let t = ((l2.p.x - l1.p.x) * l2.d.y - (l2.p.y - l1.p.y) * l2.d.x) / cross
+            let c = CGPoint(x: l1.p.x + l1.d.x * t, y: l1.p.y + l1.d.y * t)
+            // 移动超过 3px 说明剖面拟合不可靠（采到了别的结构），保留原角点
+            let o = pts[i]
+            refined.append(hypot(c.x - o.x, c.y - o.y) <= 3 ? c : o)
+        }
+        return refined
     }
 
     /// 双线性灰度采样（坐标钳到图像内；非有限值来自退化单应，按 0 处理）
