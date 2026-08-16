@@ -444,27 +444,52 @@ extension CameraStreamer {
         conn.send(content: header + json, completion: .idempotent)
     }
 
+    /// 横屏鼠标模拟器（protocol.md §8）：点击事件上报。button: "left" / "right" / "middle"
+    func sendMouseClick(_ button: String) {
+        sendControl(["type": "mouseClick", "button": button])
+    }
+
+    /// 横屏鼠标模拟器（protocol.md §8）：滚轮刻度上报，正 = 向上滚
+    func sendMouseScroll(_ delta: Int) {
+        sendControl(["type": "mouseScroll", "delta": delta])
+    }
+
     /// 对一帧相机画面做本机 ArUco 检测 + 单应映射（在 videoQueue 上同步执行）。
-    /// 结果回主线程发布；同时以 2Hz 打 LOCALAIM 日志并上报 Mac（控制帧）供两端输出对照
+    /// 结果回主线程发布；同时打 LOCALAIM 日志并上报 Mac（控制帧）供两端输出对照。
+    /// 上报 JSON 含 detected / missing 两个 ID 数组，Mac 端可分辨具体缺哪个定位码；
+    /// `detect_ms` 为本帧检测+映射耗时（Phase 0 基线测量用，只加不删保持向后兼容）
     fileprivate func localizeFrame(_ pb: CVPixelBuffer) {
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(pb) else { return }
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         let bpr = CVPixelBufferGetBytesPerRow(pb)
+        let t0 = CFAbsoluteTimeGetCurrent()
         let result = localizer.localize(bgra: base, width: w, height: h, bytesPerRow: bpr)
+        let detectMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         DispatchQueue.main.async {
             self.localMarkerCount = result.markers.count
             self.localAim = result.aim
         }
+        let detectedIds = result.markers.map { $0.id }.sorted()
+        let missingIds = [0, 1, 2, 3].filter { !detectedIds.contains($0) }
         localizeCounter += 1
+        // 10ms 节流下每帧都识别，上报按 1/5 抽稀（≈20Hz），避免控制帧挤占视频带宽
         if localizeCounter % 5 == 0 {
             if let aim = result.aim {
-                print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d",
-                             aim.x, aim.y, result.markers.count, 4))
+                print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d detected=%@ det=%.1fms",
+                             aim.x, aim.y, result.markers.count, 4,
+                             detectedIds.map(String.init).joined(separator: ","), detectMs))
+            } else if !missingIds.isEmpty {
+                print(String(format: "LOCALAIM 未集齐: detected=%@ missing=%@ det=%.1fms",
+                             "\(detectedIds)", "\(missingIds)", detectMs))
             }
-            // 本机识别结果上报 Mac（2Hz，含未集齐 4 角的空结果，便于 Mac 端 debug 对照）
-            var msg: [String: Any] = ["type": "localAim", "markers": result.markers.count]
+            // 本机识别结果上报 Mac（含未集齐 4 角的空结果 + 各标记识别状态，便于离线分析缺哪个角）
+            var msg: [String: Any] = ["type": "localAim",
+                                      "markers": result.markers.count,
+                                      "detected": detectedIds,
+                                      "missing": missingIds,
+                                      "detect_ms": detectMs]
             if let aim = result.aim { msg["x"] = aim.x; msg["y"] = aim.y }
             sendControl(msg)
         }
@@ -523,9 +548,10 @@ extension CameraStreamer: AVCaptureVideoDataOutputSampleBufferDelegate {
                        from connection: AVCaptureConnection) {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // 本机识别测试：~10Hz 节流，与推流/扫码互不阻塞（同队列顺序执行）
+        // 本机识别：≥10ms 间隔逐帧识别（alwaysDiscardsLateVideoFrames 保证队列不积压），
+        // 与推流/扫码互不阻塞（同队列顺序执行）
         let now0 = CFAbsoluteTimeGetCurrent()
-        if now0 - lastLocalizeTime >= 0.1 {
+        if now0 - lastLocalizeTime >= 0.01 {
             lastLocalizeTime = now0
             localizeFrame(pb)
         }

@@ -112,6 +112,13 @@ struct ContentView: View {
     @State private var pressActivated = false       // 本次按压是否已触发长按激活
     @State private var pressMoved = false           // 本次按压是否有位移
     @State private var showExitConfirm = false      // 退出应用二次确认
+    @State private var uiHidden = false             // 眼睛按钮：一键隐藏上下 UI 容器，只留恢复入口
+
+    /// 眼睛按钮切换：轻触反馈 + 上下容器一起显隐
+    private func toggleUIHidden() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.easeInOut(duration: 0.2)) { uiHidden.toggle() }
+    }
 
     /// 亮度调节触觉反馈：每跨 5% 刻度震一下
     private func tickBrightness(_ v: Float) {
@@ -195,49 +202,72 @@ struct ContentView: View {
 
     // MARK: - 相机正常时的主界面
     private var cameraContent: some View {
-        ZStack {
-            // 全屏相机画面（旋转由 RotationCoordinator 跟随界面方向，画面随屏幕正立）
-            CameraPreview(session: streamer.session)
-                .ignoresSafeArea()
+        GeometryReader { geo in
+            // 横屏判定：宽 > 高（界面方向由系统整体旋转，此处几何尺寸即屏幕语义）
+            let landscape = geo.size.width > geo.size.height
+            ZStack {
+                // 全屏相机画面（旋转由 RotationCoordinator 跟随界面方向，画面随屏幕正立）
+                CameraPreview(session: streamer.session)
+                    .ignoresSafeArea()
 
-            if streamer.scanning {
-                // 扫码模式：暗化遮罩 + 镂空取景框（取消走底部胶囊里的同一按钮）
-                ScanOverlay()
-            } else {
-                // 正中心瞄准十字（不旋转）
-                Crosshair()
-                    .allowsHitTesting(false)
-            }
+                if streamer.scanning {
+                    // 扫码模式：暗化遮罩 + 镂空取景框（取消走底部胶囊里的同一按钮）
+                    ScanOverlay()
+                } else {
+                    // 正中心瞄准十字（不旋转）
+                    Crosshair()
+                        .allowsHitTesting(false)
+                }
 
-            // 控件层：贴上下边，横竖屏由系统整体旋转；扫码时隐藏连接面板、保留控制胶囊
-            VStack {
-                if !streamer.scanning {
-                    if gimbal.docked {
-                        gimbalPill
-                        // DEBUG: 调试面板——云台事件历史（新事件在前），定位扳机事件通道用，稳定后可移除
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(gimbal.eventHistory.prefix(8), id: \.self) { line in
-                                Text(line)
-                                    .lineLimit(1)
+                // 横屏鼠标模拟器（protocol.md §8）：左键 / 滚轮 / 右键，贴底全幅，比例见 MousePadOverlay
+                if landscape && !streamer.scanning {
+                    MousePadOverlay(onClick: { streamer.sendMouseClick($0) },
+                                    onScroll: { streamer.sendMouseScroll($0) })
+                        .ignoresSafeArea()
+                }
+
+                // 控件层：贴上下边，横竖屏由系统整体旋转；扫码时隐藏连接面板、保留控制胶囊
+                // 眼睛按钮：隐藏时上下容器一起收起，底部只留恢复入口
+                VStack {
+                    if !streamer.scanning && !uiHidden {
+                        if gimbal.docked {
+                            gimbalPill
+                            // DEBUG: 调试面板——云台事件历史（新事件在前），定位扳机事件通道用，稳定后可移除
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(gimbal.eventHistory.prefix(8), id: \.self) { line in
+                                    Text(line)
+                                        .lineLimit(1)
+                                }
                             }
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.8))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .glassRounded(10)
                         }
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.8))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .glassRounded(10)
+                        controlPanel
+                        // 本机识别调试 pill（iOS 端坐标转换测试：实时显示映射坐标与标记数）
+                        if streamer.localMarkerCount > 0 || streamer.localAim != nil {
+                            localAimPill
+                        }
                     }
-                    controlPanel
-                    // 本机识别调试 pill（iOS 端坐标转换测试：实时显示映射坐标与标记数）
-                    if streamer.localMarkerCount > 0 || streamer.localAim != nil {
-                        localAimPill
+                    // 横屏：底部让位给鼠标触控层，控制胶囊/眼睛按钮并入顶部控件群
+                    if landscape {
+                        if uiHidden { eyeButton } else { controlCapsule }
+                    }
+                    Spacer()
+                    if !landscape {
+                        if uiHidden {
+                            eyeButton   // UI 全隐藏时：底部仅剩眼睛按钮作为恢复入口
+                        } else {
+                            controlCapsule
+                        }
+                        // 底部统一留白（原 controlCapsule 的 padding）
+                        Spacer().frame(height: 20)
                     }
                 }
-                Spacer()
-                controlCapsule
-                    .padding(.bottom, 20)
+                .padding(.top, 8)
             }
-            .padding(.top, 8)
         }
         .animation(.easeInOut(duration: 0.2), value: streamer.scanning)
     }
@@ -408,6 +438,20 @@ struct ContentView: View {
                     .contentShape(Circle())
             }
             .accessibilityLabel("退出应用")
+
+            // 分隔线 + 眼睛按钮：一键隐藏上下 UI 容器（轻触反馈）
+            Capsule()
+                .fill(.white.opacity(0.3))
+                .frame(width: 1.5, height: 24)
+            Button(action: toggleUIHidden) {
+                Image(systemName: "eye")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)   // ≥44pt 点击目标
+                    .glassCircleNeutral()
+                    .contentShape(Circle())
+            }
+            .accessibilityLabel("隐藏界面元素")
         }
         .foregroundStyle(.white)
         .padding(.leading, 8)
@@ -415,6 +459,19 @@ struct ContentView: View {
         .padding(.vertical, 8)
         .glassCapsule()
         .animation(.easeInOut(duration: 0.2), value: brightnessActive)
+    }
+
+    // MARK: - 眼睛按钮（UI 隐藏态的恢复入口：半透明 eye.slash，点击恢复全部 UI）
+    private var eyeButton: some View {
+        Button(action: toggleUIHidden) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 44, height: 44)   // ≥44pt 点击目标
+                .glassCircleNeutral()
+                .contentShape(Circle())
+        }
+        .accessibilityLabel("显示界面元素")
     }
 
     // MARK: - 本机识别调试 pill（iOS 端坐标转换测试）
@@ -608,6 +665,16 @@ extension View {
         }
     }
 
+    /// 自定义形状玻璃面（横屏鼠标触控层用，iOS 26+ 玻璃效果，旧系统回退材质）
+    @ViewBuilder
+    func glassPad<S: Shape>(_ shape: S) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular, in: shape)
+        } else {
+            self.background(.ultraThinMaterial, in: shape)
+        }
+    }
+
     @ViewBuilder
     func primaryGlassButton() -> some View {
         if #available(iOS 26.0, *) {
@@ -660,6 +727,128 @@ struct Crosshair: View {
                 .frame(width: 3, height: 3)
                 .position(c)
         }
+    }
+}
+
+// MARK: - 横屏鼠标模拟器触控层（protocol.md §8）
+/// 布局比例（按设计稿缩小版）：左右键各 22% 屏宽 × 19% 屏高，贴底部两角，内侧上角大圆角；
+/// 滚轮 14% 屏宽 × 34% 屏高，居中、底部与左右键对齐、明显高出，顶部双圆角。
+/// 交互：左/右键落指即点击（与真实鼠标按下一致，刚性触觉）；
+/// 滚轮竖拖逐格上报滚动（每 14pt 一格 + 刻度反馈），轻点滚轮 = 中键。
+struct MousePadOverlay: View {
+    var onClick: (String) -> Void      // "left" / "right" / "middle"
+    var onScroll: (Int) -> Void        // 滚轮刻度增量，正 = 向上滚
+
+    @State private var leftDown = false
+    @State private var rightDown = false
+    @State private var wheelDragging = false
+    @State private var lastScrollSteps = 0
+    private let scrollStep: CGFloat = 14   // 每 14pt 一格滚动 + 一次刻度反馈
+    private let selectionFeedback = UISelectionFeedbackGenerator()
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            // 缩小后的触控区：左右键 22% 宽 × 19% 高，滚轮 14% 宽 × 34% 高，位置不变（贴底角/居中）
+            let btnW = w * 0.22, btnH = h * 0.19
+            let wheelW = w * 0.14, wheelH = h * 0.34
+            ZStack(alignment: .bottom) {
+                HStack(spacing: 0) {
+                    mouseButton(side: "left", shape: padShape(topTrailing: btnH * 0.42),
+                                pressed: $leftDown)
+                        .frame(width: btnW, height: btnH)
+                    Spacer()
+                    mouseButton(side: "right", shape: padShape(topLeading: btnH * 0.42),
+                                pressed: $rightDown)
+                        .frame(width: btnW, height: btnH)
+                }
+                scrollWheel(shape: padShape(topLeading: 40, topTrailing: 40))
+                    .frame(width: wheelW, height: wheelH)
+            }
+            .frame(width: w, height: h, alignment: .bottom)
+        }
+    }
+
+    private func padShape(topLeading: CGFloat = 0, topTrailing: CGFloat = 0) -> UnevenRoundedRectangle {
+        UnevenRoundedRectangle(cornerRadii: .init(topLeading: topLeading, topTrailing: topTrailing))
+    }
+
+    /// 左/右键：玻璃面 + 按下高亮；落指即触发点击（刚性触觉），抬指复位
+    private func mouseButton(side: String, shape: UnevenRoundedRectangle,
+                             pressed: Binding<Bool>) -> some View {
+        Color.white.opacity(0.001)   // 透明命中底
+            .glassPad(shape)
+            .overlay(shape.fill(.white.opacity(pressed.wrappedValue ? 0.14 : 0)))
+            .overlay {
+                // 键位提示：L / R，靠外上角，半透明
+                Text(side == "left" ? "L" : "R")
+                    .font(.system(.title3, design: .rounded).weight(.semibold))
+                    .foregroundStyle(.white.opacity(pressed.wrappedValue ? 0.85 : 0.4))
+                    .padding(side == "left" ? .trailing : .leading, btnLabelInset)
+                    .padding(.top, 14)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity,
+                           alignment: side == "left" ? .topTrailing : .topLeading)
+            }
+            .contentShape(shape)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !pressed.wrappedValue else { return }
+                        pressed.wrappedValue = true
+                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                        onClick(side)   // 按下即发，跟真实鼠标一致
+                    }
+                    .onEnded { _ in pressed.wrappedValue = false }
+            )
+            .animation(.easeInOut(duration: 0.12), value: pressed.wrappedValue)
+    }
+
+    private let btnLabelInset: CGFloat = 22
+
+    /// 滚轮：竖拖逐格滚动（刻度触觉），轻点 = 中键；拖动时玻璃面高亮
+    private func scrollWheel(shape: UnevenRoundedRectangle) -> some View {
+        Color.white.opacity(0.001)
+            .glassPad(shape)
+            .overlay(shape.fill(.white.opacity(wheelDragging ? 0.12 : 0)))
+            .overlay {
+                VStack(spacing: 7) {   // 三道防滑纹，示意可滚动
+                    ForEach(0..<3, id: \.self) { _ in
+                        Capsule()
+                            .fill(.white.opacity(wheelDragging ? 0.75 : 0.35))
+                            .frame(width: 34, height: 3.5)
+                    }
+                }
+                .padding(.top, 26)
+                .frame(maxHeight: .infinity, alignment: .top)
+            }
+            .contentShape(shape)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !wheelDragging {
+                            // 落指：仅准备反馈，不立即触发（轻点留给中键）
+                            wheelDragging = true
+                            lastScrollSteps = 0
+                            selectionFeedback.prepare()
+                        }
+                        // 逐格上报：上滑 = 向上滚（正），每格一次刻度反馈
+                        let steps = Int((-value.translation.height) / scrollStep)
+                        if steps != lastScrollSteps {
+                            onScroll(steps - lastScrollSteps)
+                            selectionFeedback.selectionChanged()
+                            lastScrollSteps = steps
+                        }
+                    }
+                    .onEnded { value in
+                        // 轻点（无位移）= 中键
+                        if abs(value.translation.height) < 6 && abs(value.translation.width) < 6 {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            onClick("middle")
+                        }
+                        wheelDragging = false
+                    }
+            )
+            .animation(.easeInOut(duration: 0.12), value: wheelDragging)
     }
 }
 

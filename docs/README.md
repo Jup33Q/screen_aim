@@ -13,6 +13,7 @@
 | [decisions.md](decisions.md) | 关键设计决策记录（ADR）：为什么这么做、推翻过什么 | 准备推翻某个既有设计前必读 |
 | [development.md](development.md) | 构建、运行、验证、排错清单 | 搭环境 / 出问题时 |
 | [comment-style.md](comment-style.md) | **注释系统规范**：注释分级、模板、标记词、维护约定 | 写/改任何代码前 |
+| [positioning-optimization-plan.md](positioning-optimization-plan.md) | 定位算法优化调研与实施方案（Vision/协议/蓝牙，分 Phase 执行） | 执行定位优化任务前 |
 
 ## 文档维护约定
 

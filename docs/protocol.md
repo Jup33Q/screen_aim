@@ -119,3 +119,21 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 - Mac 端行为：立即把配对二维码按当前 IP 重新生成并重新显示（不等 5 秒 IP 看守），
   并通过 §6 `pairingQR` 消息把可见状态推回其余已连手机
 - 旧版 Mac 忽略未知 type，仅表现为断开后二维码不自动恢复，向后兼容
+
+## 8. 横屏鼠标模拟器（iPhone → Mac，控制信道）
+
+手机横屏时底部出现「左键 / 滚轮 / 右键」玻璃触控层（`MousePadOverlay`），
+事件经 §7 同一控制信道上报：
+
+```json
+{"type":"mouseClick","button":"left"}
+{"type":"mouseScroll","delta":2}
+```
+
+- `mouseClick`：`button` 为 `left` / `right` / `middle`（滚轮轻点 = 中键），
+  落指即发（与真实鼠标按下一致）；Mac 端 `postMouseClick` 在**当前光标位置**点击
+- `mouseScroll`：`delta` 为滚轮刻度（行）增量，正 = 向上滚（与手机端手指上滑同向）；
+  滚轮竖拖每 14pt 累计一格上报一次；Mac 端 `postMouseScroll` 用 `CGEvent` 滚轮事件注入
+- 两种消息都要求 Mac 端在 系统设置 > 隐私与安全性 > 辅助功能 中授权
+  （否则 CGEvent 被系统静默丢弃）
+- 旧版 Mac 忽略未知 type，仅表现为触控层无实际效果，向后兼容
