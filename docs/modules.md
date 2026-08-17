@@ -29,7 +29,8 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `DetectedMarker` | 检测结果：`id` / `center` / `corners`（帧像素，左上原点） |
 | `Homography` | 3×3 单应：`init(src:dst:)` 四点 DLT；`init(ransacSrc:dst:thresholdPx:maxIter:)` RANSAC + Accelerate `dsyev_` 最小二乘精化（ADR-007） |
 | `AffineTransform` | 二维仿射 6 参数：恰好 3 对对应点 Cramer 闭式解（WP1.1 定位兜底，ADR-013）；不能外推透视，须配合凸包护栏使用 |
-| `AimCoastFilter` | 瞄准点二维输出滤波 + 断帧滑行统一实现（WP1.2/WP3.2 共用，ADR-013）：One Euro 消抖 + 无样本帧按低通速度外推（≈100ms 半衰期衰减，默认最多 5 帧），iPhone `ScreenLocalizer` 与 Mac `Calibrator.dotFilter` 双端各持一个实例 |
+| `AimCoastFilter` | 瞄准点二维输出滤波统一实现（ADR-013/014，双端共用）：One Euro 消抖 + 跳变门限（k×max(σ̂, 下限)，滑行后首帧旁路）+ 断帧滑行（速度 ≈100ms 半衰期衰减，默认最多 5 帧）；iPhone `ScreenLocalizer.aimFilter` 与 Mac `Calibrator.dotFilter` 各持一个实例 |
+| `AimFilterPreset` | 口语化预设三档（`stable`/`daily`/`fast`，WP3.3 分层解耦）：`phone` = iPhone 识别段强消抖参数，`macDisplay` = Mac 显示段轻插值参数；人话映射表 docs/aim-filter-tuning.md |
 | `ScreenLocalizer` | 检测→映射→滤波编排：`screenCornerMap` ≥3 项即可；≥4 对 RANSAC 单应、恰好 3 对仿射兜底 + 1.5× 凸包护栏、检出不足走滑行（`quality` 三级：homography/affine/coast）；`solveAim`/`processMatches` 公开供自检直注合成匹配点；输出滤波 `aimFilter`（AimCoastFilter，`aimFilterEnabled` 可关） |
 | `OneEuroFilter` | One Euro 低通（minCutoff=1.0 / beta=0.5 / dCutoff=1.0），时间戳外部传入；`value`/`velocity` 只读暴露当前低通输出与速度（滑行外推的数据源）；连续 10 帧无输出由 Localizer/Sampler 重置 |
 | `ArucoDictionary` | id0–7 位图表 + 4 旋转查表（精确 → 汉明距 1 纠错） |
@@ -45,14 +46,18 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `ScreenSampler` | 帧处理中枢：`start()` 起 SCStream；`processJPEG` / `processBGRA` 两条入口汇到同一检测映射管线（RANSAC 映射 + One Euro 输出滤波）；`screenCornerMap` 填 ≥4 个标记的屏幕坐标后输出 `onAim`；`onMarkersDetected` 每帧回调检出标记 ID（标定层绿边的数据源）；FPS 日志带 `det=xxms` 检测耗时 |
 | `primaryIPv4()` | 本机主网卡 IPv4（优先 en0），配对二维码用 |
 | `makeQRImage` / `makeStyledQRImage` | 二维码 NSImage 生成（普通 / 小程序码圆点风格） |
-| `Calibrator` | 透明悬浮标定层：8 标记（4 角 + 4 边中点，自带白色底卡保证静区）、中央配对二维码、IP 变化看守、ESC 退出；`run()` 阻塞进主循环；`setMarkerActivation` 标记激活绿边、`markerAlpha` 白卡不透明度滑杆（0.4–1.0）、`aimDot` localAim 白点覆盖层、`aimCursor`（`--aim-cursor`）瞄准点绑光标；鼠标模拟器 `handleMouseButton` / `releaseStuckMouseButtons`（ADR-008）；localAim 写 `scenes/localaim_*.csv`（列含 detect_ms/src），鼠标事件写 `scenes/mouse_*.csv`（`logMouseEvent`，列 timestamp,event,button,delta） |
+| `Calibrator` | 透明悬浮标定层：8 标记（4 角 + 4 边中点，自带白色底卡保证静区）、中央配对二维码、IP 变化看守、ESC 退出；`run()` 阻塞进主循环；`setMarkerActivation` 标记激活绿边、`markerAlpha` 白卡不透明度滑杆（0.4–1.0）、`aimDot` localAim 白点覆盖层（`dotFilter` = Mac 显示段 AimCoastFilter：插值平滑 + 跳变门 + 断流滑行，参数来自 `--filter-preset` / `--dot-*`，预设经 calib `filterPreset` 字段下发 iPhone 识别段）、`aimCursor`（`--aim-cursor`）瞄准点绑光标；鼠标模拟器 `handleMouseButton` / `releaseStuckMouseButtons`（ADR-008）；localAim 写 `scenes/localaim_*.csv`（列含 detect_ms/src/quality），鼠标事件写 `scenes/mouse_*.csv`（`logMouseEvent`，列 timestamp,event,button,delta） |
 | `postMouseDown/Up/Click/Scroll` | 鼠标模拟器事件注入（protocol.md §8）：当前光标位置 CGEvent 按下/抬起/点击/滚轮；需辅助功能授权，否则事件被系统静默丢弃 |
 
-命令行自检/基准：`--self-test`（OpenCV 管线，8 标记 + 遮挡模拟）、`--swift-self-test`
-（纯 Swift 管线同款判据）、`--swift-detect IMG [GT] [--verbose]`（双检测器对比）、
-`--swift-seq IMGS... [--cutoff C --beta B]`（序列 σ 基准，Phase 1.3 验收工具）、
-`--replay DIR [--min-cell-gap X] [--thresh-c X] [--window N] [--no-refine]`
-（采集会话回放：线上/离线/OpenCV 参照三方命中率 + 中心误差 + aim σ + 拒绝直方图 + replay.csv）。
+命令行自检/基准：`--self-test`（OpenCV 管线，8 标记 + 遮挡模拟 + WP1 仿射兜底/护栏/滑行
+合成场景）、`--swift-self-test`（纯 Swift 管线同款判据）、`--swift-detect IMG [GT] [--verbose]`
+（双检测器对比）、`--swift-seq IMGS... [--cutoff C --beta B]`（序列 σ 基准，Phase 1.3 验收工具）、
+`--filter-self-test`（WP3 滤波层验收：静止 σ 回归 / 单帧 15pt 跳变门 / 断流滑行 / 预设横扫滞后，
+确定性合成信号）、`--replay DIR [--min-cell-gap X] [--thresh-c X] [--window N] [--no-refine]`
+（采集会话回放：线上/离线/OpenCV 参照三方命中率 + 中心误差 + aim σ + 拒绝直方图 +
+匹配对数/quality 分布与三点簇转化率 + replay.csv）。
+生产模式调参：`--filter-preset stable|daily|fast` + 单项旋钮
+`--dot-min-cutoff/--dot-beta/--dot-coast-frames/--dot-gate-k`（docs/aim-filter-tuning.md）。
 
 ## iOS 端（ios/AimPhone，XcodeGen 工程）
 

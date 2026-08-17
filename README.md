@@ -85,7 +85,16 @@ open ios/AimPhone.xcodeproj          # 打开后选择你的 Development Team，
 精化 + One Euro 滤波），合成基准场景（tools/make_bench_scenes.py，1280×720 帧）
 数字为：24pt 静止 σr 0.171 → 0.080pt（-53%）；20pt 中距失焦组命中率 56% → 72%；
 20pt 远距组（帧上 8–15px）34% → 44%。真机复测用 `--calibrate --serve` 跑会话后
-`tools/plot_localaim.py` 分析 `scenes/localaim_*.csv`（含 detect_ms 列）。
+`tools/plot_localaim.py` 分析 `scenes/localaim_*.csv`（含 detect_ms/quality 列）。
+
+**边角定位与滤波手感（WP1/WP3，2026-08-17）**：贴近边角瞄准只有 3 个标记可见时
+走仿射兜底（凸包护栏 1.5×，回放三点簇帧转化率 10/10 = 100%，护栏外零假阳性）；
+检出不足时白点按速度衰减滑行最多 5 帧不再一丢就隐；跳变门限拦单帧跳变
+（15pt 注入实测：门开偏离 0.19pt vs 门关 14.31pt）；静止 σ 不劣化
+（bench 0.080pt 持平）。**滤波预设三档与单项旋钮的人话调参指南：
+[docs/aim-filter-tuning.md](docs/aim-filter-tuning.md)**（`--filter-preset
+stable|daily|fast` + `--dot-*` 旋钮；横扫平均误差实测：稳如三脚架 1.15pt /
+日常跟手 0.66pt / 疾速响应 0.40pt）。
 
 透明悬浮层为每个标记附带 8pt 白色底卡，保证任意桌面背景下的 ArUco 静区；
 窗口点击穿透、置顶、不遮挡正常屏幕内容，ESC 退出。

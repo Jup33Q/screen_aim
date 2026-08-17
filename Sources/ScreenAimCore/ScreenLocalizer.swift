@@ -41,15 +41,22 @@ public final class ScreenLocalizer {
     public let detector = ArucoDetector()
     /// 输出侧滤波 + 断帧滑行开关；基准对比时关闭（关闭后无滤波也无滑行，测原始几何解）
     public var aimFilterEnabled = true
-    /// iPhone 识别段输出滤波（强消抖，对 15Hz 原始识别噪声）+ 断帧滑行（ADR-013/014）。
-    /// 公开以便调参：默认 minCutoff=1.0 / beta=0.5 / 滑行 5 帧，调参指南见 docs/aim-filter-tuning.md
-    public let aimFilter = AimCoastFilter()
+    /// iPhone 识别段输出滤波（WP3.3 分层：本段对 15Hz 原始识别噪声强消抖，是消抖主战场；
+    /// Mac 显示段只插值平滑不重复消抖，参数见 AimFilterPreset.macDisplay）+ 跳变门限 +
+    /// 断帧滑行（ADR-013/014）。公开以便调参，口语化指南见 docs/aim-filter-tuning.md
+    public let aimFilter = AimCoastFilter(params: AimFilterPreset.daily.phone)
     /// 仿射兜底发散护栏倍数：映射瞄点须在三点外接框以框心放大该倍数的范围内（WP1.1）。
     /// 仿射不能外推透视，护栏外误差发散，宁可无输出也不给误导性坐标
     public var affineGuardFactor: Double = 1.5
     private var noAimFrames = 0
 
     public init() {}
+
+    /// 应用口语化预设的识别段参数（WP3.4，calib 下发的 `filterPreset` 字段驱动；
+    /// 只换参数不重置滤波状态，切换瞬间无跳变）
+    public func applyFilterPreset(_ preset: AimFilterPreset) {
+        aimFilter.params = preset.phone
+    }
 
     /// 处理一帧紧凑/带 padding 的 BGRA 数据。
     /// - Parameter timestamp: 帧时间戳（秒，单调）。nil 取当前墙钟；

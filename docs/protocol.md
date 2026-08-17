@@ -62,12 +62,17 @@ IP 变化时 Mac 端每 5 秒自动重生成二维码；手机一连上，二维
 ```json
 {"type":"calib","screenW":1728.0,"screenH":1117.0,
  "markers":{"0":[36.0,36.0],"1":[1692.0,36.0],"2":[1692.0,1081.0],"3":[36.0,1081.0],
-            "4":[864.0,36.0],"5":[1692.0,558.5],"6":[864.0,1081.0],"7":[36.0,558.5]}}
+            "4":[864.0,36.0],"5":[1692.0,558.5],"6":[864.0,1081.0],"7":[36.0,558.5]},
+ "filterPreset":"daily"}
 ```
 
 - `markers`：定位码 id → 屏幕点坐标（左上角原点），与 Mac 端 `screenCornerMap` 同源。
   冗余 8 标记（ADR-007）：id0–3 四角、id4–7 四边中点（上/右/下/左），任取 ≥4 个即可建单应；
   条目数随 Calibrator 布局自动扩展，格式本身不变
+- `filterPreset`：口语化滤波预设（WP3.4 新增可选字段，只加不删）：
+  `stable` / `daily` / `fast`，iPhone 端应用到识别段滤波（`ScreenLocalizer.applyFilterPreset`）；
+  旧版 iPhone 忽略该字段、保持编译期默认档；旧版 Mac 不下发时新版 iPhone 同为默认档。
+  逐项参数映射见 docs/aim-filter-tuning.md
 - iPhone 端 `CameraStreamer.receiveControl/handleControl` 接收并写入 `ScreenLocalizer`
 - 收不到时（旧版 Mac）iPhone 用内置默认表（1728×1117 + 48pt 标记 + 24pt 边距，同为 8 项）
 - 旧版 iPhone 从不读反向数据，消息滞留连接缓冲区无影响，向后兼容；

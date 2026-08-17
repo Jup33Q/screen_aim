@@ -499,6 +499,12 @@ extension CameraStreamer {
             guard map.count >= 4 else { return }
             videoQueue.async {
                 self.localizer.screenCornerMap = map
+                // 口语化滤波预设（WP3.4，protocol.md §6：只加不删的可选字段，
+                // 旧版 Mac 不下发则保持编译期默认「日常跟手」）
+                if let name = obj["filterPreset"] as? String,
+                   let preset = AimFilterPreset(rawValue: name) {
+                    self.localizer.applyFilterPreset(preset)
+                }
             }
             DispatchQueue.main.async {
                 self.calibSource = "Mac 下发"

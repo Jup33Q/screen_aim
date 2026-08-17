@@ -523,15 +523,18 @@ final class Calibrator: NSObject {
     var currentPayload = ""
     var debugLabel: NSTextField?  // 手机端本机识别结果（localAim）的悬浮 debug 文本
     /// iPhone 数据流瞄准点白点覆盖层：位置完全来自 protocol.md §7 localAim 上报
-    /// （手机本机识别结果），与 Mac 端视频帧识别管线无关；无瞄准点/断连时隐藏
+    /// （手机本机识别结果），与 Mac 端视频帧识别管线无关；滑行预算耗尽/断连时隐藏
     var aimDot: NSView?
-    /// 白点输出二段 One Euro 滤波：iPhone 端 ScreenLocalizer 已过滤一段，
-    /// 但 localAim 上报仅 ≈15Hz（ADR-009）且 TCP 到达间隔抖动，直接摆点有步进感；
-    /// 桌面端再过滤一段让轨迹丝滑（速度自适应，横扫靠 beta 不拖）。
-    /// 白点每次隐藏（断连）即重置，恢复后从最新瞄准点重新开始，
-    /// 不被过期状态拖走；无瞄准点则按连续 10 帧才重置（与 ScreenSampler.registerNoAim
-    /// 同策略），单帧掉检抖动不打断滤波状态
-    var dotFilterX = OneEuroFilter(), dotFilterY = OneEuroFilter()
+    /// Mac 显示段滤波（WP3.3 分层解耦，ADR-014）：iPhone 识别段已强消抖，本段只做
+    /// ≈15Hz 上报（ADR-009）→ 显示的插值平滑 + 跳变门 + 断流滑行，不重复消抖
+    /// （双段都强消抖时横扫滞后叠加）。断流帧白点按速度衰减外推滑行（WP3.2，
+    /// 与 iPhone 段共用 AimCoastFilter），最多 maxCoastFrames 帧才隐藏。
+    /// 参数由 --filter-preset / 四个单项旋钮注入（口语化指南 docs/aim-filter-tuning.md）；
+    /// 断连即重置，恢复后从最新瞄准点重新开始，不被过期状态拖走；
+    /// 滑行耗尽后连续 10 帧无瞄准点才重置（与 ScreenSampler.registerNoAim 同策略）
+    let dotFilter = AimCoastFilter(params: AimFilterPreset.daily.macDisplay)
+    /// 当前生效的口语化预设（calib 负载 filterPreset 字段下发给 iPhone 识别段，WP3.4）
+    var filterPreset: AimFilterPreset = .daily
     /// 连续无瞄准点的 localAim 帧计数（主线程访问）：≥10 才重置 dotFilter
     private var dotNoAimFrames = 0
     var centers: [CGPoint] = []        // 当前 8 个标记中心的屏幕点坐标（左上角原点）
@@ -766,6 +769,9 @@ final class Calibrator: NSObject {
             "type": "calib",
             "screenW": Double(screenW), "screenH": Double(screenH),
             "markers": markers,
+            // 口语化滤波预设（WP3.4，protocol.md §6：只加不删，旧版 iPhone 忽略该字段、
+            // 保持其编译期默认档）
+            "filterPreset": filterPreset.rawValue,
         ]
         return try? JSONSerialization.data(withJSONObject: payload)
     }
@@ -1240,8 +1246,7 @@ final class Calibrator: NSObject {
                         self?.releaseStuckMouseButtons()   // §8：按住中断连，补发 up 防键卡死
                         DispatchQueue.main.async {
                             self?.aimDot?.isHidden = true   // 数据流中断，白点隐藏
-                            self?.dotFilterX.reset()        // 滤波器随白点隐藏重置，重连后不被过期状态拖走
-                            self?.dotFilterY.reset()
+                            self?.dotFilter.reset()         // 滤波器随白点隐藏重置，重连后不被过期状态拖走
                             self?.dotNoAimFrames = 0
                             self?.setMarkerActivation([])   // 绿边全部失效
                             self?.refreshQRNow?()
@@ -1268,13 +1273,15 @@ final class Calibrator: NSObject {
                                 self?.debugLabel?.stringValue = text
                                 self?.debugLabel?.textColor = .white
                                 // 白点取 iPhone 数据流的瞄准点（全精度 Double，非 debug 取整值），
-                                // 先过二段 One Euro 滤波消除 ≈15Hz 上报的步进感（时间戳取到达墙钟）；
+                                // 过显示段 AimCoastFilter（插值平滑 + 跳变门，不重复消抖，ADR-014；
+                                // 时间戳取到达墙钟）；
                                 // 屏幕点坐标左上角原点 → AppKit 左下角原点，y 翻转；钳制在屏内
                                 if let dot = self?.aimDot {
                                     self?.dotNoAimFrames = 0
                                     let t = CACurrentMediaTime()
-                                    let fx = self?.dotFilterX.filter(x, at: t) ?? x
-                                    let fy = self?.dotFilterY.filter(y, at: t) ?? y
+                                    let out = self?.dotFilter.update(raw: CGPoint(x: x, y: y), at: t)
+                                    let fx = out?.point.x ?? CGFloat(x)
+                                    let fy = out?.point.y ?? CGFloat(y)
                                     let d = dot.frame.width
                                     let cx = min(max(CGFloat(fx), 0), W - 1)
                                     let cy = min(max(CGFloat(fy), 0), H - 1)
@@ -1293,14 +1300,28 @@ final class Calibrator: NSObject {
                             DispatchQueue.main.async { [weak self] in
                                 self?.debugLabel?.stringValue = "iPhone 瞄准: 缺定位码 [\(missStr)]（检出 \(n)/8）"
                                 self?.debugLabel?.textColor = .systemYellow
-                                self?.aimDot?.isHidden = true   // 无瞄准点，白点隐藏
+                                // 断流滑行（WP3.2，与 iPhone 段共用 AimCoastFilter）：
+                                // 无瞄准点的上报帧白点按速度衰减外推继续滑行，最多
+                                // maxCoastFrames 帧（默认 5 ≈ 330ms@15Hz）才隐藏，
+                                // 不再一丢就隐（旧行为：单帧掉检白点即消失）
+                                let t = CACurrentMediaTime()
+                                if let out = self?.dotFilter.update(raw: nil, at: t),
+                                   let dot = self?.aimDot {
+                                    let d = dot.frame.width
+                                    let cx = min(max(CGFloat(out.point.x), 0), W - 1)
+                                    let cy = min(max(CGFloat(out.point.y), 0), H - 1)
+                                    dot.frame = NSRect(x: cx - d / 2, y: H - cy - d / 2,
+                                                       width: d, height: d)
+                                    dot.isHidden = false
+                                } else {
+                                    self?.aimDot?.isHidden = true   // 滑行预算耗尽，白点隐藏
+                                }
                                 // 连续 10 帧无瞄准点才重置滤波器：单帧掉检不重置，
                                 // 恢复后白点从滤波状态平滑出现而非跳变
                                 if let s = self {
                                     s.dotNoAimFrames += 1
                                     if s.dotNoAimFrames >= 10 {
-                                        s.dotFilterX.reset()
-                                        s.dotFilterY.reset()
+                                        s.dotFilter.reset()
                                         s.dotNoAimFrames = 0
                                     }
                                 }
@@ -1736,6 +1757,139 @@ if CommandLine.arguments.contains("--swift-seq") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--filter-self-test") {
+    setbuf(stdout, nil)
+    // WP3 滤波层验收（确定性合成信号，方案 §3.3 / ADR-014）：静止 σ 回归、单帧跳变门、
+    // 断流滑行、预设横扫滞后对比。时间轴 15Hz（真实识别/上报节奏；静止 σ 另报 30Hz
+    // 与 README 既有基准对齐）；噪声为固定种子 xorshift64* + Box-Muller 高斯，跨平台可复现
+    var rngState: UInt64 = 0x9E3779B97F4A7C15
+    func uniform() -> Double {
+        rngState ^= rngState >> 12; rngState ^= rngState << 25; rngState ^= rngState >> 27
+        return Double((rngState &* 0x2545F4914F6CDD1D) >> 11) / Double(1 << 53)
+    }
+    func gauss() -> Double {
+        let u1 = max(uniform(), 1e-12), u2 = uniform()
+        return sqrt(-2 * log(u1)) * cos(2 * .pi * u2)
+    }
+    func sigmaR(_ pts: [CGPoint]) -> Double {
+        guard pts.count > 1 else { return 0 }
+        let n = Double(pts.count)
+        let mx = pts.map(\.x).reduce(0, +) / n, my = pts.map(\.y).reduce(0, +) / n
+        let sx = sqrt(pts.map { ($0.x - mx) * ($0.x - mx) }.reduce(0, +) / (n - 1))
+        let sy = sqrt(pts.map { ($0.y - my) * ($0.y - my) }.reduce(0, +) / (n - 1))
+        return hypot(sx, sy)
+    }
+    func fail(_ msg: String) -> Never { print("滤波自检失败: \(msg)"); exit(1) }
+
+    // ① 静止 σ 回归：输入 σr=0.171pt（0.121pt/轴，复刻 README bench 基准的原始识别噪声：
+    // 「24pt 静止 σr 0.171 → 0.080pt」）。门限开启不得劣化消抖，30Hz 时间轴与该基准对齐
+    let noiseAxis = 0.171 / sqrt(2.0)
+    for fps in [30.0, 15.0] {
+        let on = AimCoastFilter(params: AimFilterPreset.daily.phone)
+        var offP = AimFilterPreset.daily.phone; offP.gateK = nil
+        let off = AimCoastFilter(params: offP)
+        var outsOn: [CGPoint] = [], outsOff: [CGPoint] = []
+        for i in 0..<300 {
+            let t = Double(i) / fps
+            let raw = CGPoint(x: 500 + noiseAxis * gauss(), y: 400 + noiseAxis * gauss())
+            if let o = on.update(raw: raw, at: t), i >= 60 { outsOn.append(o.point) }
+            if let o = off.update(raw: raw, at: t), i >= 60 { outsOff.append(o.point) }
+        }
+        let sOn = sigmaR(outsOn), sOff = sigmaR(outsOff)
+        print(String(format: "  ① 静止 σ（%dHz）: 跳变门开 σr=%.3fpt / 关 σr=%.3fpt",
+                     Int(fps), sOn, sOff))
+        if fps == 30, sOn > 0.09 { fail("30Hz 静止 σr \(sOn)pt 劣化于现状基准 0.080pt") }
+        if sOn > sOff * 1.05 { fail("跳变门显著劣化静止 σ（\(sOn) vs \(sOff)）") }
+    }
+
+    // ② 单帧 15pt 跳变（RANSAC 漏网离群模拟）：跳变门开时白点不甩（最大偏离 < 5pt）
+    do {
+        let on = AimCoastFilter(params: AimFilterPreset.daily.phone)
+        var offP = AimFilterPreset.daily.phone; offP.gateK = nil
+        let off = AimCoastFilter(params: offP)
+        var devOn = 0.0, devOff = 0.0
+        for i in 0..<300 {
+            let t = Double(i) / 15.0
+            var raw = CGPoint(x: 500 + noiseAxis * gauss(), y: 400 + noiseAxis * gauss())
+            if i == 150 { raw.x += 15 }   // 单帧人工跳变
+            if let o = on.update(raw: raw, at: t), i > 100 {
+                devOn = max(devOn, hypot(o.point.x - 500, o.point.y - 400))
+            }
+            if let o = off.update(raw: raw, at: t), i > 100 {
+                devOff = max(devOff, hypot(o.point.x - 500, o.point.y - 400))
+            }
+        }
+        print(String(format: "  ② 单帧 15pt 跳变: 最大偏离 门限开 %.2fpt / 门限关 %.2fpt", devOn, devOff))
+        if devOn >= 5 { fail("跳变门开仍甩出 \(devOn)pt") }
+        if devOn > devOff / 2 { fail("跳变门未显著抑制甩动（开 \(devOn) vs 关 \(devOff)）") }
+    }
+
+    // ③ 断流滑行：300pt/s 匀速移动中断流 3 帧，白点须继续滑行不消失、方向不回退；
+    // 断流 7 帧时第 6 帧起（超 maxCoastFrames=5）消失
+    do {
+        let f = AimCoastFilter(params: AimFilterPreset.daily.phone)
+        func truth(_ i: Int) -> CGPoint {
+            let t = Double(i) / 15.0
+            return t < 4 ? CGPoint(x: 100, y: 400) : CGPoint(x: 100 + 300 * (t - 4), y: 400)
+        }
+        var glideOK = true, coastNonNil = 0, prevX = -Double.infinity
+        var nilAt: [Int] = []
+        var prev: CGPoint?, maxStep = 0.0
+        for i in 0..<300 {
+            let t = Double(i) / 15.0
+            let drop3 = (100...102).contains(i)      // 3 帧断流
+            let drop7 = (200...206).contains(i)      // 7 帧断流
+            var raw: CGPoint? = nil
+            if !drop3, !drop7 {
+                let p = truth(i)
+                raw = CGPoint(x: p.x + 0.05 * gauss(), y: p.y + 0.05 * gauss())
+            }
+            let out = f.update(raw: raw, at: t)
+            if drop3 {
+                if let o = out {
+                    coastNonNil += 1
+                    if o.point.x < prevX - 0.01 { glideOK = false }
+                    prevX = o.point.x
+                } else { glideOK = false }
+            }
+            if drop7, out == nil { nilAt.append(i) }
+            if (100...110).contains(i), let o = out {
+                if let p = prev { maxStep = max(maxStep, hypot(o.point.x - p.x, o.point.y - p.y)) }
+                prev = o.point
+            }
+        }
+        print(String(format: "  ③ 断流滑行: 3 帧断流滑行输出 %d/3 帧（匀速方向保持 %@），断流区最大单帧步进 %.1fpt；7 帧断流于第 %@ 帧起消失",
+                     coastNonNil, glideOK ? "✓" : "✗", maxStep,
+                     nilAt.map { $0 - 200 + 1 }.map(String.init).joined(separator: ",")))
+        if coastNonNil != 3 || !glideOK { fail("3 帧断流内白点消失或回退") }
+        if nilAt != [205, 206] { fail("7 帧断流消失时机 \(nilAt)，期望第 6/7 帧（205/206）") }
+    }
+
+    // ④ 预设横扫滞后：±200pt 正弦横扫（0.5Hz，峰值速度 628pt/s），
+    // 「疾速响应」平均误差须明显小于「稳如三脚架」
+    do {
+        func sweepErr(_ preset: AimFilterPreset) -> Double {
+            let f = AimCoastFilter(params: preset.phone)
+            var errs: [Double] = []
+            for i in 0..<600 {
+                let t = Double(i) / 15.0
+                let tx = 864 + 200 * sin(2 * .pi * 0.5 * t)
+                let raw = CGPoint(x: tx + noiseAxis * gauss(), y: 558.5 + noiseAxis * gauss())
+                if let o = f.update(raw: raw, at: t), i >= 120 {
+                    errs.append(hypot(o.point.x - tx, o.point.y - 558.5))
+                }
+            }
+            return errs.reduce(0, +) / Double(errs.count)
+        }
+        let eStable = sweepErr(.stable), eDaily = sweepErr(.daily), eFast = sweepErr(.fast)
+        print(String(format: "  ④ 横扫平均误差: 稳如三脚架 %.2fpt / 日常跟手 %.2fpt / 疾速响应 %.2fpt",
+                     eStable, eDaily, eFast))
+        if eFast >= eStable * 0.7 { fail("疾速响应(\(eFast)pt) 未明显小于稳如三脚架(\(eStable)pt)") }
+    }
+    print("滤波自检通过 ✅")
+    exit(0)
+}
+
 if let ri = CommandLine.arguments.firstIndex(of: "--replay"),
    CommandLine.arguments.count > ri + 1 {
     setbuf(stdout, nil)
@@ -1906,9 +2060,33 @@ if CommandLine.arguments.contains("--calibrate") {
     }
     // --aim-cursor: 手机帧识别出的瞄准点直接绑定鼠标光标位置（protocol.md §5）
     let aimCursor = CommandLine.arguments.contains("--aim-cursor")
+    // WP3.4 口语化调参（逐项说明见 docs/aim-filter-tuning.md）：
+    // --filter-preset stable|daily|fast 选预设档（同时经 calib 下发 iPhone 识别段），
+    // 四个单项旋钮只覆盖 Mac 显示段参数（iPhone 段跟预设走）
+    func optD(_ name: String) -> Double? {
+        guard let i = CommandLine.arguments.firstIndex(of: name),
+              CommandLine.arguments.count > i + 1 else { return nil }
+        return Double(CommandLine.arguments[i + 1])
+    }
+    var preset = AimFilterPreset.daily
+    if let i = CommandLine.arguments.firstIndex(of: "--filter-preset"),
+       CommandLine.arguments.count > i + 1,
+       let p = AimFilterPreset(rawValue: CommandLine.arguments[i + 1]) {
+        preset = p
+    }
+    var dotParams = preset.macDisplay
+    if let v = optD("--dot-min-cutoff") { dotParams.minCutoff = v }   // 「静止时白点有多稳」0.4–2.0
+    if let v = optD("--dot-beta") { dotParams.beta = v }              // 「甩动时有多跟手」0.2–1.5
+    if let v = optD("--dot-coast-frames") { dotParams.maxCoastFrames = max(0, Int(v)) }  // 「断识后续滑多久」0–10
+    if let v = optD("--dot-gate-k") { dotParams.gateK = v > 0 ? v : nil }  // 「跳变过滤多严格」1.5–4.0 / 0=关
     // 顶层全局强引用持有 Calibrator，保证滑杆/按钮闭包里的 weak self 在整个生命周期有效
     let calibrator = Calibrator(markerSize: size, inset: inset, pad: pad, servePort: servePort,
                                 aimCursor: aimCursor)
+    calibrator.filterPreset = preset
+    calibrator.dotFilter.params = dotParams
+    if preset != .daily || dotParams != AimFilterPreset.daily.macDisplay {
+        print("滤波调参: preset=\(preset.rawValue) Mac显示段 minCutoff=\(dotParams.minCutoff) beta=\(dotParams.beta) coast=\(dotParams.maxCoastFrames)帧 gateK=\(dotParams.gateK.map { String($0) } ?? "关")")
+    }
     calibrator.run()  // 阻塞
 }
 
