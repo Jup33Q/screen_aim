@@ -440,9 +440,10 @@ extension CameraStreamer {
         // 每帧识别每帧上报（不抽稀，≈15Hz，ADR-009）：Mac 端白点覆盖层/debug 对照的流畅度
         // 优先于控制信道流量（光标跟随走 Mac 侧视频帧识别，与本上报无关）
         if let aim = result.aim {
-            print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d detected=%@ det=%.1fms",
+            print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d detected=%@ q=%@ det=%.1fms",
                          aim.x, aim.y, result.markers.count, 8,
-                         detectedIds.map(String.init).joined(separator: ","), detectMs))
+                         detectedIds.map(String.init).joined(separator: ","),
+                         result.quality?.rawValue ?? "-", detectMs))
         } else if !missingIds.isEmpty {
             print(String(format: "LOCALAIM 检出不足: detected=%@ missing=%@ det=%.1fms",
                          "\(detectedIds)", "\(missingIds)", detectMs))
@@ -453,7 +454,11 @@ extension CameraStreamer {
                                   "detected": detectedIds,
                                   "missing": missingIds,
                                   "detect_ms": detectMs]
-        if let aim = result.aim { msg["x"] = aim.x; msg["y"] = aim.y }
+        if let aim = result.aim {
+            msg["x"] = aim.x; msg["y"] = aim.y
+            // 输出等级（WP1，protocol.md §7：只加不删，旧版 Mac 忽略该字段）
+            if let q = result.quality { msg["quality"] = q.rawValue }
+        }
         sendControl(msg)
         // 数据采集（protocol.md §10）：录制中则抽帧落盘；到点自动 finish 并上传。
         // 注意此时 pb 仍持锁（本函数 defer 解锁），PNG 编码可以直接读

@@ -1,6 +1,7 @@
 //
 //  Homography.swift
-//  ScreenAimCore — 纯 Swift 单应矩阵：四点 DLT（高斯消元）+ ≥4 点 RANSAC/最小二乘，
+//  ScreenAimCore — 纯 Swift 单应矩阵：四点 DLT（高斯消元）+ ≥4 点 RANSAC/最小二乘；
+//  附 AffineTransform（恰好 3 点闭式解，WP1.1 定位兜底）。
 //  iOS/macOS 双端可用（最小二乘用系统框架 Accelerate 的 dsyev_，零第三方依赖）
 //
 //  与 Mac 端 OpenCV getPerspectiveTransform / findHomography 同语义：
@@ -127,5 +128,41 @@ public struct Homography {
         guard abs(w) > 1e-12 else { return p }
         return CGPoint(x: (h[0] * x + h[1] * y + h[2]) / w,
                        y: (h[3] * x + h[4] * y + h[5]) / w)
+    }
+}
+
+/// 二维仿射变换（6 参数）：恰好 3 对对应点的闭式精确解（WP1.1 定位兜底，ADR-013）。
+///
+/// 屏幕是平面，三点簇内仿射与单应的误差仅 pt 级；但仿射不能外推透视，
+/// 远离三角形后误差发散——调用方必须用凸包护栏限制使用范围
+/// （`ScreenLocalizer.affineGuardFactor`），护栏外的输出宁可没有。
+public struct AffineTransform {
+    /// [a b c d e f]：u = a·x + b·y + c，v = d·x + e·y + f
+    public var m: [Double]
+
+    /// 三点闭式解（Cramer 法则，无需 Accelerate）。src/dst 必须恰好 3 点；
+    /// 三点共线/退化返回 nil
+    public init?(src: [CGPoint], dst: [CGPoint]) {
+        guard src.count == 3, dst.count == 3 else { return nil }
+        let x0 = src[0].x, y0 = src[0].y, x1 = src[1].x, y1 = src[1].y, x2 = src[2].x, y2 = src[2].y
+        // 系数矩阵 [x y 1] 三行的行列式；≈0 即三点共线（面元退化，无解）
+        let den = x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1)
+        guard abs(den) > 1e-12 else { return nil }
+        // u 行与 v 行同系数矩阵，仅常数列不同，同一组 Cramer 公式套两次
+        func row(_ u0: Double, _ u1: Double, _ u2: Double) -> (Double, Double, Double) {
+            let a = (u0 * (y1 - y2) + u1 * (y2 - y0) + u2 * (y0 - y1)) / den
+            let b = (x0 * (u1 - u2) + x1 * (u2 - u0) + x2 * (u0 - u1)) / den
+            let c = (x0 * (y1 * u2 - y2 * u1) + x1 * (y2 * u0 - y0 * u2) + x2 * (y0 * u1 - y1 * u0)) / den
+            return (a, b, c)
+        }
+        let (a, b, c) = row(dst[0].x, dst[1].x, dst[2].x)
+        let (d, e, f) = row(dst[0].y, dst[1].y, dst[2].y)
+        m = [a, b, c, d, e, f]
+    }
+
+    /// 点映射：p → M·p（无透视除法）
+    public func map(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: m[0] * p.x + m[1] * p.y + m[2],
+                y: m[3] * p.x + m[4] * p.y + m[5])
     }
 }

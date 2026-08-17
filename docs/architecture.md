@@ -36,7 +36,7 @@ iPhone 相机对着 Mac 屏幕 → Mac 识别屏幕四角的 ArUco 标记 → �
 | 模块 | 文件 | 职责 | 依赖方向 |
 |---|---|---|---|
 | OpenCVBridge | `Sources/OpenCVBridge/` | ObjC++ 封装 `cv::aruco` 检测、标记生成、单应映射（`getPerspectiveTransform` / `findHomography` RANSAC） | 只依赖 OpenCV |
-| ScreenAimCore | `Sources/ScreenAimCore/` | 纯 Swift 定位核（双端共享）：ArUco 检测（含亚像素角点精化）、单应（四点 DLT / RANSAC+最小二乘）、One Euro 输出滤波 | 只依赖 Accelerate |
+| ScreenAimCore | `Sources/ScreenAimCore/` | 纯 Swift 定位核（双端共享）：ArUco 检测（含亚像素角点精化）、单应（四点 DLT / RANSAC+最小二乘）、仿射兜底（3 点闭式解 + 凸包护栏，ADR-013）、One Euro 输出滤波 + 断帧滑行（`AimCoastFilter`） | 只依赖 Accelerate |
 | ScreenSampler | `Sources/ScreenAim/main.swift` | 帧入口（SCStream / JPEG）→ 检测 → RANSAC 映射 → One Euro 滤波 → `onAim` 回调 | → OpenCVBridge / ScreenAimCore |
 | FrameServerV2 | `Sources/ScreenAim/FrameServerV2.swift` | TLV 单连接帧服务（视频/控制/采集回传，§11）+ Bonjour 广播；`CaptureIngestor` 采集落盘 | → ScreenSampler.processJPEG |
 | Calibrator | `Sources/ScreenAim/main.swift` | 透明悬浮标定层：8 标记（4 角 + 4 边中点，ADR-007）、配对二维码、自动填映射表 | → ScreenSampler / FrameServerV2 |

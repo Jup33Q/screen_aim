@@ -18,6 +18,7 @@
 		AFB37EF52CF5389D28CA98D0 /* Info 2.plist in Resources */ = {isa = PBXBuildFile; fileRef = 016FD7C05212667336980E0E /* Info 2.plist */; };
 		BF520732211D33E182F3258D /* ScreenLocalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */; };
 		CF0C190E4FB427B2799F2E0A /* ArucoDictionary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */; };
+		D6AFD3A520FB60EB234BED2A /* AimCoastFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 307CF9A7BAE793860B9BBAE3 /* AimCoastFilter.swift */; };
 		E4AF9E8E8EA6ADEB992E7FAF /* GimbalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830EBE3C6A616155318C105A /* GimbalManager.swift */; };
 		ED3B37E721CC705253961C50 /* CameraStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F801D5BF510A50654CB415E0 /* CameraStreamer.swift */; };
 		F898C1AE86A0AE9866D63EAC /* Homography.swift in Sources */ = {isa = PBXBuildFile; fileRef = AECA2E6D05700778951A4826 /* Homography.swift */; };
@@ -26,6 +27,7 @@
 /* Begin PBXFileReference section */
 		016FD7C05212667336980E0E /* Info 2.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Info 2.plist"; sourceTree = "<group>"; };
 		276ABCAE4B7D65A82CFB10A4 /* AimPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AimPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		307CF9A7BAE793860B9BBAE3 /* AimCoastFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AimCoastFilter.swift; sourceTree = "<group>"; };
 		509959D5A8A70C12D2B615A9 /* TLVMessageType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TLVMessageType.swift; sourceTree = "<group>"; };
 		570CDB1B79715F6D759EFE6A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArucoDictionary.swift; sourceTree = "<group>"; };
@@ -46,6 +48,7 @@
 		743A8CF4986AAF60A6FD1420 /* ScreenAimCore */ = {
 			isa = PBXGroup;
 			children = (
+				307CF9A7BAE793860B9BBAE3 /* AimCoastFilter.swift */,
 				66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */,
 				AECA2E6D05700778951A4826 /* Homography.swift */,
 				FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */,
@@ -162,6 +165,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D6AFD3A520FB60EB234BED2A /* AimCoastFilter.swift in Sources */,
 				4CFCCB77CF72136A2046BCCC /* AimPhoneApp.swift in Sources */,
 				CF0C190E4FB427B2799F2E0A /* ArucoDictionary.swift in Sources */,
 				ED3B37E721CC705253961C50 /* CameraStreamer.swift in Sources */,

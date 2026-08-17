@@ -98,20 +98,26 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 
 ```json
 {"type":"localAim","markers":6,"detected":[0,1,2,4,5,6],"missing":[3,7],
- "x":864.0,"y":558.5,"detect_ms":12.3}
+ "x":864.0,"y":558.5,"detect_ms":12.3,"quality":"homography"}
 ```
 
-- `markers`：本帧检出的定位码数量（0–8）；匹配标记 <4 时无 `x`/`y` 字段（ADR-007 后
-  不再要求 4 角集齐，≥4 个匹配即出瞄准点）
+- `markers`：本帧检出的定位码数量（0–8）；匹配标记 <3 且滑行预算耗尽时无 `x`/`y` 字段
+  （ADR-007 后不再要求 4 角集齐，≥4 个匹配走单应；WP1 起恰好 3 个匹配走仿射兜底，
+  检出不足时最多滑行 5 帧，ADR-013）
 - `detected` / `missing`：检出 / 缺失的标记 ID 数组（全集 id0–7）
 - `x`/`y`：帧中心映射的屏幕点坐标（左上角原点），与手机端 `localAim` 同源
 - `detect_ms`：本帧检测+映射耗时（Phase 0 基线测量；旧客户端无此字段，Mac 端按 0 记录）
+- `quality`：输出等级（WP1 新增可选字段，只加不删，旧端忽略）：
+  `homography`（≥4 对 RANSAC 单应）/ `affine`（恰好 3 对仿射兜底，凸包护栏内）/
+  `coast`（断帧滑行外推）；无 `x`/`y` 时无此字段
 - 用途：Mac 端 debug 对照（两端同帧各自识别，比对输出一致性）。Mac 端 `FrameServer.onControl`
   打印，实时显示在标定层底部胶囊 debug 标签（检出不足时变黄提示「缺定位码」），
   并把 `x`/`y` 瞄准点渲染为屏幕上的白点覆盖层（无瞄准点/断连时隐藏）；
   **每条上报追加一行结构化日志**到 `scenes/localaim_<会话时间>.csv`
-  （列：`timestamp,markers,ids,x,y,detect_ms,src`，无瞄准点时 `x,y` 留空，
-  `src` 为来源通道，目前恒为 `tcp`），供离线统计识别成功率与轨迹
+  （列：`timestamp,markers,ids,x,y,detect_ms,src,quality`，无瞄准点时 `x,y` 留空，
+  `src` 为来源通道（TLV 链路记 `tlv`，旧链路历史数据为 `tcp`，§11）；
+  `quality` 列 WP1 新增、只加不删，旧客户端上报留空），
+  供离线统计识别成功率与轨迹
 - iPhone 端 `CameraStreamer.localizeFrame` 发送；旧版 Mac 忽略未知 type/未知字段，向后兼容
 
 第三种消息——**手机主动断开通知**：

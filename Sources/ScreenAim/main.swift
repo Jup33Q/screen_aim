@@ -554,11 +554,12 @@ final class Calibrator: NSObject {
     private var mousePermWarned = false   // 辅助功能未授权的一次性警告去重
 
     /// 追加一条 localAim 记录到 scenes/localaim_<会话时间>.csv（onControl 在 conn 队列，加锁串行化）。
-    /// 列：timestamp,markers,ids,x,y,detect_ms,src。ids 为本帧检出的标记 ID（如 "0|2"），
+    /// 列：timestamp,markers,ids,x,y,detect_ms,src,quality。ids 为本帧检出的标记 ID（如 "0|2"），
     /// 缺失的标记 = 全集减去该集合；detect_ms 为上报端检测耗时（旧客户端无此字段时为 0）；
-    /// src 为数据来源通道（目前恒为 tcp；Phase 3 会新增 udp），离线分析用
+    /// src 为数据来源通道（目前恒为 tlv；旧链路历史数据为 tcp），离线分析用；
+    /// quality 为输出等级（WP1 新增列，只加不删：homography/affine/coast；旧客户端无此字段时留空）
     func logLocalAim(markers n: Int, ids: [Int], x: Double?, y: Double?,
-                     detectMs: Double, src: String) {
+                     detectMs: Double, src: String, quality: String? = nil) {
         csvLock.lock(); defer { csvLock.unlock() }
         if csvHandle == nil {
             let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -567,7 +568,7 @@ final class Calibrator: NSObject {
             let url = dir.appendingPathComponent("localaim_\(csvStamp).csv")
             if !FileManager.default.fileExists(atPath: url.path) {
                 FileManager.default.createFile(atPath: url.path,
-                                               contents: "timestamp,markers,ids,x,y,detect_ms,src\n".data(using: .utf8))
+                                               contents: "timestamp,markers,ids,x,y,detect_ms,src,quality\n".data(using: .utf8))
             }
             csvHandle = FileHandle(forWritingAtPath: url.path)
             csvHandle?.seekToEndOfFile()
@@ -575,8 +576,8 @@ final class Calibrator: NSObject {
         }
         let xy: String = (x != nil && y != nil) ? String(format: "%.1f,%.1f", x!, y!) : ","
         let idStr = ids.map(String.init).joined(separator: "|")
-        let row = String(format: "%.3f,%d,%@,%@,%.1f,%@\n",
-                         Date().timeIntervalSince1970, n, idStr, xy, detectMs, src)
+        let row = String(format: "%.3f,%d,%@,%@,%.1f,%@,%@\n",
+                         Date().timeIntervalSince1970, n, idStr, xy, detectMs, src, quality ?? "")
         if let data = row.data(using: .utf8) { csvHandle?.write(data) }
     }
 
@@ -1254,11 +1255,14 @@ final class Calibrator: NSObject {
                         let detected = (msg["detected"] as? [Int]) ?? []
                         let missing = (msg["missing"] as? [Int]) ?? (0...7).filter { !detected.contains($0) }
                         let detMs = msg["detect_ms"] as? Double ?? 0
+                        // 输出等级（WP1 新增可选字段，旧客户端无此字段；只加不删）
+                        let quality = msg["quality"] as? String
                         if let x = msg["x"] as? Double, let y = msg["y"] as? Double {
-                            print(String(format: "LOCALAIM iPhone: screen=(%.1f, %.1f) markers=%d/8 detected=%@ det=%.1fms",
-                                         x, y, n, detected.map(String.init).joined(separator: ","), detMs))
+                            print(String(format: "LOCALAIM iPhone: screen=(%.1f, %.1f) markers=%d/8 detected=%@ q=%@ det=%.1fms",
+                                         x, y, n, detected.map(String.init).joined(separator: ","),
+                                         quality ?? "-", detMs))
                             self?.logLocalAim(markers: n, ids: detected, x: x, y: y,
-                                              detectMs: detMs, src: src)
+                                              detectMs: detMs, src: src, quality: quality)
                             let text = String(format: "iPhone 瞄准: (%.1f, %.1f)  标记 %d/8", x, y, n)
                             DispatchQueue.main.async { [weak self] in
                                 self?.debugLabel?.stringValue = text
@@ -1418,6 +1422,71 @@ if CommandLine.arguments.contains("--self-test") {
             print(String(format: "  遮挡相邻双角 id=0,1: 误差 %.2fpt", err))
             guard err <= 2 else { print("自检失败: 遮挡双角后误差 \(err)pt"); exit(1) }
         } else { print("自检失败: 遮挡相邻双角后无输出"); exit(1) }
+
+        // MARK: WP1 仿射兜底 + 断帧滑行（合成匹配点直注 processMatches，无需图像，ADR-013）
+        // 近距瞄角场景：逻辑屏 1728×1117，视野只覆盖左上角簇（角标 id0 + 上中 id4 + 左中 id7，
+        // 即方案 §0 统计的 L 形三点簇）；帧 1280×720，帧上位置 = 屏幕坐标 × 0.8 + 偏移
+        do {
+            let loc = ScreenLocalizer()
+            loc.screenCornerMap = [0: CGPoint(x: 36, y: 36), 4: CGPoint(x: 864, y: 36),
+                                   7: CGPoint(x: 36, y: 558.5)]
+            func synth(_ p: CGPoint, s: Double, off: CGPoint) -> CGPoint {
+                CGPoint(x: p.x * s + off.x, y: p.y * s + off.y)
+            }
+            let dst3 = [loc.screenCornerMap[0]!, loc.screenCornerMap[4]!, loc.screenCornerMap[7]!]
+            // 场景 1：瞄点在簇内（帧中心映射到屏幕 (737.5, 375)，三点外接框内）→ 仿射输出，误差 < 5pt
+            let src3 = dst3.map { synth($0, s: 0.8, off: CGPoint(x: 50, y: 60)) }
+            let truth = CGPoint(x: (640 - 50) / 0.8, y: (360 - 60) / 0.8)
+            guard let (aim3, q3) = loc.solveAim(src: src3, dst: dst3,
+                                                frameCenter: CGPoint(x: 640, y: 360)) else {
+                print("自检失败: 三点簇（簇内瞄点）仿射兜底无输出"); exit(1)
+            }
+            let err3 = hypot(aim3.x - truth.x, aim3.y - truth.y)
+            print(String(format: "  三点簇仿射兜底: quality=%@ 误差 %.2fpt（期望≈(%.1f, %.1f)）",
+                         q3.rawValue, err3, truth.x, truth.y))
+            guard q3 == .affine, err3 < 5 else {
+                print("自检失败: 三点簇仿射 quality=\(q3) 误差 \(err3)pt"); exit(1)
+            }
+            // 场景 2：瞄点强外推（帧中心映射到屏幕 (-575, -300)，超出 1.5× 凸包护栏）→ 必须无解
+            let src3b = dst3.map { synth($0, s: 0.8, off: CGPoint(x: 1100, y: 600)) }
+            guard loc.solveAim(src: src3b, dst: dst3, frameCenter: CGPoint(x: 640, y: 360)) == nil else {
+                print("自检失败: 护栏外强外推仍给出输出（发散护栏失效）"); exit(1)
+            }
+            print("  护栏外强外推: 正确拒绝输出（1.5× 凸包护栏）")
+            // 场景 3：断帧滑行——先喂一帧 4 对有效解，再连续喂无解帧：
+            // 前 maxCoastFrames（5）帧有 coast 输出，第 6 帧起 nil
+            let loc2 = ScreenLocalizer()
+            loc2.screenCornerMap = [0: CGPoint(x: 36, y: 36), 1: CGPoint(x: 1692, y: 36),
+                                    2: CGPoint(x: 1692, y: 1081), 3: CGPoint(x: 36, y: 1081)]
+            let src4 = [0, 1, 2, 3].map { synth(loc2.screenCornerMap[$0]!, s: 0.5,
+                                                off: CGPoint(x: 100, y: 100)) }
+            let dst4 = [0, 1, 2, 3].map { loc2.screenCornerMap[$0]! }
+            let center = CGPoint(x: 640, y: 360)
+            let (aim0, q0) = loc2.processMatches(src: src4, dst: dst4, frameCenter: center,
+                                                 timestamp: 0)
+            guard aim0 != nil, q0 == .homography else {
+                print("自检失败: 滑行前置帧（4 对单应）无输出"); exit(1)
+            }
+            var coastFrames = 0
+            for i in 1...6 {
+                let (aimI, qI) = loc2.processMatches(src: [], dst: [], frameCenter: center,
+                                                     timestamp: Double(i) / 15.0)
+                if let a = aimI {
+                    guard qI == .coast else {
+                        print("自检失败: 滑行帧 quality=\(String(describing: qI))，期望 coast"); exit(1)
+                    }
+                    // 静止相机滑行输出应保持原位（速度≈0 不漂移）
+                    guard hypot(a.x - aim0!.x, a.y - aim0!.y) < 1 else {
+                        print("自检失败: 静止滑行漂移超过 1pt"); exit(1)
+                    }
+                    coastFrames += 1
+                }
+            }
+            guard coastFrames == 5 else {
+                print("自检失败: 滑行帧数 \(coastFrames)，期望 5（默认 maxCoastFrames）"); exit(1)
+            }
+            print("  断帧滑行: 5 帧 coast 输出（静止无漂移），第 6 帧起正确置 nil")
+        }
         print("自检通过 ✅ (场景图: \(scenePath))")
         exit(0)
     } catch {
@@ -1622,8 +1691,8 @@ if CommandLine.arguments.contains("--swift-seq") {
     let raw = ScreenLocalizer()     // 未滤波对照
     raw.aimFilterEnabled = false
     let flt = ScreenLocalizer()
-    flt.aimFilterX.minCutoff = cutoff; flt.aimFilterY.minCutoff = cutoff
-    flt.aimFilterX.beta = beta; flt.aimFilterY.beta = beta
+    flt.aimFilter.params.minCutoff = cutoff
+    flt.aimFilter.params.beta = beta
     var mapLoaded = false
     var rawAims: [CGPoint] = [], fltAims: [CGPoint] = []
     for (i, f) in files.enumerated() {
@@ -1702,6 +1771,10 @@ if let ri = CommandLine.arguments.firstIndex(of: "--replay"),
     var onlineHit: [Int: Int] = [:], offHit: [Int: Int] = [:], cvHit: [Int: Int] = [:]
     var centerErrs: [Double] = []
     var aims: [CGPoint] = []
+    // WP1 验收统计：匹配对数分布、输出等级分布、恰好 3 对匹配帧的仿射兜底转化率
+    var matchHist: [Int: Int] = [:]
+    var qualityHist: [String: Int] = [:]
+    var threeMatchFrames = 0, threeMatchAim = 0
     var csv = ["frame,id,online,offline,cv,offline_cx,offline_cy,cv_cx,cv_cy,center_err_px"]
     for line in metaText.split(separator: "\n") {
         guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
@@ -1721,6 +1794,10 @@ if let ri = CommandLine.arguments.firstIndex(of: "--replay"),
         let offMap = result.markers.reduce(into: [Int: CGPoint]()) { $0[$1.id] = $1.center }
         let cvMap = cv.reduce(into: [Int: CGPoint]()) { $0[Int($1.markerId)] = $1.center }
         if let aim = result.aim { aims.append(aim) }
+        let matched = offMap.keys.filter { localizer.screenCornerMap[$0] != nil }.count
+        matchHist[matched, default: 0] += 1
+        if let q = result.quality { qualityHist[q.rawValue, default: 0] += 1 }
+        if matched == 3 { threeMatchFrames += 1; if result.aim != nil { threeMatchAim += 1 } }
         for id in 0...7 {
             let on = onlineIDs.contains(id), off = offMap[id] != nil, c = cvMap[id] != nil
             if on { onlineHit[id, default: 0] += 1 }
@@ -1761,6 +1838,18 @@ if let ri = CommandLine.arguments.firstIndex(of: "--replay"),
         let sy = sqrt(aims.map { ($0.y - my) * ($0.y - my) }.reduce(0, +) / (n - 1))
         print(String(format: "aim σ（未滤波，n=%d）: σx=%.3fpt σy=%.3fpt σr=%.3fpt",
                      aims.count, sx, sy, hypot(sx, sy)))
+    }
+    // WP1 验收：匹配对数分布 + 输出等级分布 + 三点簇帧仿射转化率（目标 ≈100%，护栏外零输出）
+    print("匹配对数分布: " + matchHist.sorted { $0.key < $1.key }
+        .map { "\($0.key)对:\($0.value)帧" }.joined(separator: " "))
+    if !qualityHist.isEmpty {
+        print("输出等级分布: " + qualityHist.sorted { $0.key < $1.key }
+            .map { "\($0.key):\($0.value)" }.joined(separator: " "))
+    }
+    if threeMatchFrames > 0 {
+        print(String(format: "三点簇帧转化率: %d/%d = %.0f%%（仿射兜底，护栏外应无输出）",
+                     threeMatchAim, threeMatchFrames,
+                     Double(threeMatchAim) / Double(threeMatchFrames) * 100))
     }
     let hist = localizer.detector.rejectHistogram.sorted { $0.value > $1.value }
     if !hist.isEmpty {

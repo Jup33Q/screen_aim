@@ -2,6 +2,29 @@
 
 每条 = 决策 + 原因 + 推翻它之前要满足的条件。按时间倒序。
 
+## ADR-013 3 点仿射兜底 + 断帧滑行（边角几何饥饿的软件修复，WP1）
+
+- **决策**（2026-08-17，方案 docs/edge-localization-and-filter-plan.md §1）：
+  ① iPhone 纯 Swift 定位层（`ScreenLocalizer.solveAim`）匹配恰好 3 对时退化为仿射变换
+  （`AffineTransform`，三点 Cramer 闭式解，无需 Accelerate），输出等级
+  `quality=affine`；**发散护栏**：映射瞄点超出三点外接框以框心放大 1.5 倍的范围时
+  仍返回 nil（`affineGuardFactor`，护栏外宁可无输出）；
+  ② 检出不足/护栏拒绝时不断帧即丢：`AimCoastFilter`（ScreenAimCore 新文件，双端共用）
+  按 One Euro 最近低通速度外推、速度按 ≈100ms 半衰期指数衰减，最多 5 帧
+  （≈330ms@15Hz），输出 `quality=coast`，超 5 帧才返回 nil；
+  ③ localAim 上报与 localaim CSV 新增 `quality` 字段/列（homography/affine/coast），
+  协议只加不删，旧端忽略。
+- **原因**：2026-08-17 四真机会话（约 2 万帧）统计：无瞄准帧的 10–25% 是
+  「检出 1–3 个标记」的几何饥饿（近距瞄角视野只有角标 + 相邻边中点的 L 形簇，
+  不够 RANSAC ≥4 对门槛），连续无瞄准段中位仅 2 帧。屏幕是平面，三点簇内仿射
+  与单应误差 pt 级，掉检空窗用速度衰减滑行填充即可转化绝大部分缺失帧。
+  **设计推导**：WP1.2 方案原文"沿用上一有效变换外推"与速度衰减滑行等价——
+  帧中心在帧像素系恒为 (w/2, h/2)，旧变换重投影每帧输出同一点，正是速度为零的
+  滑行特例；故 WP1.2 与 WP3.2 收敛为 `AimCoastFilter` 一个实现，禁止两处各写一份。
+- **推翻条件**：护栏外假阳性被实测证实（先收紧 `affineGuardFactor` 或加凸包内判定）；
+  滑行输出被证实误导用户（调 `maxCoastFrames` 至 0 即回退旧行为）；
+  WP2 卫星标记 A/B 达标使三点簇帧消失（仿射兜底自然不再触发，代码保留）。
+
 ## ADR-012 Wi-Fi Aware 通道终止：macOS SDK 层不可用（P0 尖刺结论）
 
 - **决策**（2026-08-17 P0 尖刺）：ADR-011 之③（WA 升首选通道）**终止**。

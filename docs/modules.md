@@ -28,12 +28,14 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `ArucoDetector` | 纯 Swift ArUco 检测（DICT_4X4_50 id0–7）：自适应阈值 + 连通域 + 字典匹配；亚像素角点精化（法向剖面 + TLS 直线拟合，`subpixelRefine` 可关）；`maxCandidates` 候选解码上限（按像素数降序截断，防噪点拖垮 decode）；`rejectHistogram` 拒绝原因计数（回放调参用） |
 | `DetectedMarker` | 检测结果：`id` / `center` / `corners`（帧像素，左上原点） |
 | `Homography` | 3×3 单应：`init(src:dst:)` 四点 DLT；`init(ransacSrc:dst:thresholdPx:maxIter:)` RANSAC + Accelerate `dsyev_` 最小二乘精化（ADR-007） |
-| `ScreenLocalizer` | 检测→映射→滤波编排：`screenCornerMap` ≥4 项即可；输出侧内嵌 One Euro 滤波（`aimFilterEnabled` 可关，`aimFilterX/Y` 可调参） |
-| `OneEuroFilter` | One Euro 低通（minCutoff=1.0 / beta=0.5 / dCutoff=1.0），时间戳外部传入；连续 10 帧无输出由 Localizer/Sampler 重置 |
+| `AffineTransform` | 二维仿射 6 参数：恰好 3 对对应点 Cramer 闭式解（WP1.1 定位兜底，ADR-013）；不能外推透视，须配合凸包护栏使用 |
+| `AimCoastFilter` | 瞄准点二维输出滤波 + 断帧滑行统一实现（WP1.2/WP3.2 共用，ADR-013）：One Euro 消抖 + 无样本帧按低通速度外推（≈100ms 半衰期衰减，默认最多 5 帧），iPhone `ScreenLocalizer` 与 Mac `Calibrator.dotFilter` 双端各持一个实例 |
+| `ScreenLocalizer` | 检测→映射→滤波编排：`screenCornerMap` ≥3 项即可；≥4 对 RANSAC 单应、恰好 3 对仿射兜底 + 1.5× 凸包护栏、检出不足走滑行（`quality` 三级：homography/affine/coast）；`solveAim`/`processMatches` 公开供自检直注合成匹配点；输出滤波 `aimFilter`（AimCoastFilter，`aimFilterEnabled` 可关） |
+| `OneEuroFilter` | One Euro 低通（minCutoff=1.0 / beta=0.5 / dCutoff=1.0），时间戳外部传入；`value`/`velocity` 只读暴露当前低通输出与速度（滑行外推的数据源）；连续 10 帧无输出由 Localizer/Sampler 重置 |
 | `ArucoDictionary` | id0–7 位图表 + 4 旋转查表（精确 → 汉明距 1 纠错） |
 | `TLVMessageType` | TLV 消息类型号（protocol.md §11）：video=0 / control=1 / captureMeta=10 / captureFrame=11；线上常量双端共享 |
 
-| `FrameServerV2` | TLV 单连接帧服务（protocol.md §11，9100 端口，Bonjour `_aimphone._tcp`，P3 起唯一传输服务）：NetworkListener + 内置 TLV framer，`messages` 按 type 分发 0/1/10/11；`onFrame` 交 JPEG，`onConnect` 通知已配对，`onControl` 分发控制消息（§6/§7/§8），`onDisconnect` 断连回调（鼠标键卡死兜底，ADR-008），`handshakePayload` 连接即下发标定表，采集回调 `sessionInfo`/`onCaptureDone`；**`TCP().noDelay(true)` 必开**（§11） |
+| `FrameServerV2` | TLV 单连接帧服务（protocol.md §11，9100 端口，Bonjour `_aimphone._tcp`，P3 起唯一传输服务）：NetworkListener + 内置 TLV framer，`messages` 按 type 分发 0/1/10/11；`onFrame` 交 JPEG，`onConnect` 通知已配对，`onControl` 分发控制消息（§6/§7/§8），`onDisconnect` 断连回调（鼠标键卡死兜底，ADR-008），`handshakePayload` 连接即下发标定表，采集回调 `sessionInfo`/`onCaptureDone`；采集落盘经文件内私有 `CapturePipeline` 有界管道（容量 8，enqueue 挂起即背压）异步消费，接收循环不再被磁盘 I/O 卡住；**`TCP().noDelay(true)` 必开**（§11） |
 | `CaptureIngestor` | 采集落盘器（type 10/11）：落盘 `scenes/capture_*/` 三件套（frames/NNNN.png + meta.jsonl + session.json 双端合并），中途断连按已收帧数兜底收尾 |
 
 ### `Sources/ScreenAim/main.swift`

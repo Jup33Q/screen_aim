@@ -30,6 +30,11 @@ public final class OneEuroFilter {
         self.dCutoff = dCutoff
     }
 
+    /// 当前低通输出（未初始化时为 nil）。断帧滑行外推的起点（AimCoastFilter 用）
+    public var value: Double? { xHat }
+    /// 当前低通速度估计（单位/秒）。断帧滑行外推的速度来源（AimCoastFilter 用）
+    public var velocity: Double { dxHat }
+
     /// 回到未初始化状态；下一帧输入直接透传并作为新基线
     public func reset() {
         xHat = nil
