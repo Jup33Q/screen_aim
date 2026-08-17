@@ -531,12 +531,28 @@ final class Calibrator: NSObject {
     /// 与 iPhone 段共用 AimCoastFilter），最多 maxCoastFrames 帧才隐藏。
     /// 参数由 --filter-preset / 四个单项旋钮注入（口语化指南 docs/aim-filter-tuning.md）；
     /// 断连即重置，恢复后从最新瞄准点重新开始，不被过期状态拖走；
-    /// 滑行耗尽后连续 10 帧无瞄准点才重置（与 ScreenSampler.registerNoAim 同策略）
+    /// 滑行耗尽后连续 10 帧无瞄准点才重置（与 ScreenSampler.registerNoAim 同策略）。
+    /// 60Hz 显示定时器另用其只读接口 displayExtrapolation 在两次上报空窗内
+    /// 匀速死推算重摆白点（WP-L1，ADR-015），不改滤波状态、不计入滑行预算
     let dotFilter = AimCoastFilter(params: AimFilterPreset.daily.macDisplay)
     /// 当前生效的口语化预设（calib 负载 filterPreset 字段下发给 iPhone 识别段，WP3.4）
     var filterPreset: AimFilterPreset = .daily
     /// 连续无瞄准点的 localAim 帧计数（主线程访问）：≥10 才重置 dotFilter
     private var dotNoAimFrames = 0
+
+    /// 白点摆点共用换算（WP-L1 抽出，ADR-015）：屏幕点坐标（左上角原点）→
+    /// AppKit 左下角原点（y 翻转 + 屏内钳制），摆 aimDot 并置可见。
+    /// localAim 到达帧 / 断流滑行帧 / 60Hz 外推定时器三处共用——禁止复制第二份，
+    /// 两份换算漂移会让外推点与权威位置打架
+    private func placeAimDot(at p: CGPoint) {
+        guard let dot = aimDot, screenW > 0 else { return }
+        let d = dot.frame.width
+        let cx = min(max(p.x, 0), screenW - 1)
+        let cy = min(max(p.y, 0), screenH - 1)
+        dot.frame = NSRect(x: cx - d / 2, y: screenH - cy - d / 2,
+                           width: d, height: d)
+        dot.isHidden = false
+    }
     var centers: [CGPoint] = []        // 当前 8 个标记中心的屏幕点坐标（左上角原点）
     var markerCards: [NSView] = []     // 当前 8 块白卡视图（rebuildMarkers 重建）
     /// 当前被识别到（激活）的标记 ID 集合：setMarkerActivation 增量比对，仅翻转项发动画
@@ -915,6 +931,19 @@ final class Calibrator: NSObject {
                 win.contentView?.addSubview(dot)
                 aimDot = dot
 
+                // 60Hz 显示外推定时器（WP-L1，ADR-015）：两次 localAim 到达（≈15Hz）之间
+                // 把白点重摆到 dotFilter 的匀速死推算外推点，填平显示空窗——"到达才摆"的
+                // ≤66ms 保持滞后与阶梯感来源（白点滞后方案 §0 #6）。只动显示：权威位置
+                // 仍是到达帧 update() 输出，断流滑行预算仍只由 update(raw: nil) 帧计数
+                // 控制；白点隐藏时（滑行耗尽/断连/未初始化）空转直接返回。
+                // 主 runloop 定时器与到达更新同在主线程（Calibrator 约定），无竞争
+                Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+                    guard let self, let dot = self.aimDot, !dot.isHidden else { return }
+                    if let p = self.dotFilter.displayExtrapolation(at: CACurrentMediaTime()) {
+                        self.placeAimDot(at: p)
+                    }
+                }
+
                 // 帧处理解耦（识别慢于 15fps 到达率时丢旧帧保最新）：
                 // 此前 onFrame 在 conn 队列同步执行，识别一帧期间不收下一帧，
                 // TCP 缓冲积压 → 延迟累积、有效帧率远低于手机端。改为 busy 标志 +
@@ -1274,20 +1303,14 @@ final class Calibrator: NSObject {
                                 self?.debugLabel?.textColor = .white
                                 // 白点取 iPhone 数据流的瞄准点（全精度 Double，非 debug 取整值），
                                 // 过显示段 AimCoastFilter（插值平滑 + 跳变门，不重复消抖，ADR-014；
-                                // 时间戳取到达墙钟）；
-                                // 屏幕点坐标左上角原点 → AppKit 左下角原点，y 翻转；钳制在屏内
-                                if let dot = self?.aimDot {
+                                // 时间戳取到达墙钟）；到达帧 update() 输出是权威位置（WP-L1：
+                                // 60Hz 外推定时器只填两次到达之间的显示空窗）。
+                                // y 翻转 + 屏内钳制统一走 placeAimDot，此处不再内联换算
+                                if self?.aimDot != nil {
                                     self?.dotNoAimFrames = 0
                                     let t = CACurrentMediaTime()
                                     let out = self?.dotFilter.update(raw: CGPoint(x: x, y: y), at: t)
-                                    let fx = out?.point.x ?? CGFloat(x)
-                                    let fy = out?.point.y ?? CGFloat(y)
-                                    let d = dot.frame.width
-                                    let cx = min(max(CGFloat(fx), 0), W - 1)
-                                    let cy = min(max(CGFloat(fy), 0), H - 1)
-                                    dot.frame = NSRect(x: cx - d / 2, y: H - cy - d / 2,
-                                                       width: d, height: d)
-                                    dot.isHidden = false
+                                    self?.placeAimDot(at: out?.point ?? CGPoint(x: x, y: y))
                                 }
                             }
                         } else {
@@ -1306,13 +1329,8 @@ final class Calibrator: NSObject {
                                 // 不再一丢就隐（旧行为：单帧掉检白点即消失）
                                 let t = CACurrentMediaTime()
                                 if let out = self?.dotFilter.update(raw: nil, at: t),
-                                   let dot = self?.aimDot {
-                                    let d = dot.frame.width
-                                    let cx = min(max(CGFloat(out.point.x), 0), W - 1)
-                                    let cy = min(max(CGFloat(out.point.y), 0), H - 1)
-                                    dot.frame = NSRect(x: cx - d / 2, y: H - cy - d / 2,
-                                                       width: d, height: d)
-                                    dot.isHidden = false
+                                   self?.aimDot != nil {
+                                    self?.placeAimDot(at: out.point)
                                 } else {
                                     self?.aimDot?.isHidden = true   // 滑行预算耗尽，白点隐藏
                                 }
@@ -1885,6 +1903,61 @@ if CommandLine.arguments.contains("--filter-self-test") {
         print(String(format: "  ④ 横扫平均误差: 稳如三脚架 %.2fpt / 日常跟手 %.2fpt / 疾速响应 %.2fpt",
                      eStable, eDaily, eFast))
         if eFast >= eStable * 0.7 { fail("疾速响应(\(eFast)pt) 未明显小于稳如三脚架(\(eStable)pt)") }
+    }
+    // ⑤ 显示外推（WP-L1，ADR-015）：displayExtrapolation 是只读匀速死推算 + 120ms 封顶。
+    // 匀速 300pt/s（真实横扫量级）样本后 +33/+66ms 外推点与真值轨迹误差 < 1pt；
+    // 静止样本外推漂移 < 0.1pt；超 120ms 时距外推值 = 封顶点（原地保持）；
+    // 未初始化返回 nil。注意本服务的是 Mac 显示段，滤波器用 macDisplay 预设
+    do {
+        if AimCoastFilter().displayExtrapolation(at: 1.0) != nil {
+            fail("未初始化滤波器外推应返回 nil")
+        }
+        // 匀速段：静止 2s 后 300pt/s 匀速（真值形态同 ③），充分稳定后取最后时刻外推
+        let f = AimCoastFilter(params: AimFilterPreset.daily.macDisplay)
+        func truth(_ t: Double) -> CGPoint {
+            t < 2 ? CGPoint(x: 100, y: 400) : CGPoint(x: 100 + 300 * (t - 2), y: 400)
+        }
+        var lastT = 0.0
+        for i in 0..<600 {
+            let t = Double(i) / 15.0
+            let p = truth(t)
+            _ = f.update(raw: CGPoint(x: p.x + 0.05 * gauss(), y: p.y + 0.05 * gauss()), at: t)
+            lastT = t
+        }
+        var maxErr = 0.0
+        for dt in [0.033, 0.066] {
+            guard let p = f.displayExtrapolation(at: lastT + dt) else {
+                fail("匀速样本后外推返回 nil")
+            }
+            let q = truth(lastT + dt)
+            maxErr = max(maxErr, hypot(p.x - q.x, p.y - q.y))
+        }
+        // 静止段：Mac 显示段输入是 iPhone 段已消抖的信号，静止残差 σr≈0.08pt 级
+        // （tuning 文档基准），喂 0.05pt/轴噪声贴近该量级而非原始识别噪声
+        f.reset()
+        for i in 0..<300 {
+            let t = Double(i) / 15.0
+            _ = f.update(raw: CGPoint(x: 500 + 0.05 * gauss(), y: 400 + 0.05 * gauss()), at: t)
+            lastT = t
+        }
+        var maxDrift = 0.0
+        for dt in [0.033, 0.066, AimCoastFilter.maxDisplayExtrapolation] {
+            guard let p = f.displayExtrapolation(at: lastT + dt),
+                  let p0 = f.displayExtrapolation(at: lastT) else {
+                fail("静止样本后外推返回 nil")
+            }
+            maxDrift = max(maxDrift, hypot(p.x - p0.x, p.y - p0.y))
+        }
+        // 封顶：超 120ms 时距的外推值必须等于封顶点（原地保持，不再继续前进）
+        guard let pCap = f.displayExtrapolation(at: lastT + AimCoastFilter.maxDisplayExtrapolation),
+              let pFar = f.displayExtrapolation(at: lastT + 10.0) else {
+            fail("封顶检查外推返回 nil")
+        }
+        print(String(format: "  ⑤ 显示外推: 匀速300pt/s +33/+66ms 最大误差 %.3fpt；静止外推漂移 %.3fpt；超 120ms 时距 %@封顶点",
+                     maxErr, maxDrift, pFar == pCap ? "等于" : "偏离"))
+        if maxErr >= 1.0 { fail("匀速外推误差 \(maxErr)pt ≥ 1pt") }
+        if maxDrift >= 0.1 { fail("静止外推漂移 \(maxDrift)pt ≥ 0.1pt") }
+        if pFar != pCap { fail("超 120ms 时距外推值 \(pFar) ≠ 封顶点 \(pCap)") }
     }
     print("滤波自检通过 ✅")
     exit(0)

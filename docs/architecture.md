@@ -81,6 +81,11 @@ Mac 显示段（Calibrator.dotFilter，≈15Hz 上报到达墙钟）
 两段共用 `AimCoastFilter` 同一实现；消抖必须留在 iPhone 段（网络到达抖动会污染
 滤波时间轴，protocol.md §11 Nagle 攒批实测即证据）。
 
+显示外推（WP-L1，ADR-015）：Mac 端另有 60Hz 主线程定时器，两次 localAim 到达之间
+用 `dotFilter.displayExtrapolation(at:)`（只读匀速死推算，时距封顶 120ms）重摆白点，
+填平"到达才摆"的显示空窗；不改滤波状态、不计断流滑行预算，到达帧 `update()` 输出
+仍是权威位置，白点隐藏时定时器空转。
+
 ## 坐标系约定（易错点）
 
 | 坐标系 | 原点 | 单位 | 用在哪 |

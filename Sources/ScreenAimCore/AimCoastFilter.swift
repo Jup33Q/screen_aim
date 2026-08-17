@@ -26,6 +26,9 @@ import CoreGraphics
 /// 3. 断帧滑行（WP1.2/WP3.2）：无样本帧按最近低通速度外推，速度按 coastHalfLife
 ///    半衰期指数衰减，最多 maxCoastFrames 帧，超出返回 nil（调用方隐藏白点）；
 ///    外推样本回灌低通，识别恢复时输出平滑接回。
+/// 另提供只读接口 `displayExtrapolation(at:)`（WP-L1，ADR-015）：Mac 60Hz 显示
+/// 定时器在两次上报空窗内按 coastVel 匀速死推算摆点（时距封顶 120ms），
+/// 不改滤波状态，与上述三层机制正交。
 /// NOTE: WP1.2 方案原文的"沿用上一变换重投影"与滑行等价——帧中心在帧像素系
 /// 恒为 (w/2, h/2)，旧变换重投影每帧输出同一点，正是速度为零的滑行特例。
 public final class AimCoastFilter {
@@ -118,6 +121,27 @@ public final class AimCoastFilter {
         lastOut = out
         lastT = t
         return (out, true)
+    }
+
+    /// 显示外推时距上限（秒，WP-L1/ADR-015）：外推只填两次上报之间的显示空窗，
+    /// 超过上限返回封顶点原地保持——网络延迟突增时防止白点持续冲过真实位置（方案 §5）
+    public static let maxDisplayExtrapolation = 0.12
+
+    /// 显示段死推算外推（WP-L1，ADR-015）：返回 t 时刻的纯外推显示位置，**只读**，
+    /// 不改任何滤波状态。供 Mac 60Hz 显示定时器在两次 localAim 到达的空窗内重摆白点；
+    /// 权威位置仍是 `update()` 的输出，断流滑行预算也仍只由 `update(raw: nil)`
+    /// 的帧计数控制，本接口与滑行语义正交。
+    ///
+    /// 位置 = `lastOut + coastVel × Δt`，窗口内**不做速度衰减**：≤120ms 窗口里
+    /// coastHalfLife（0.1s）衰减会把 +66ms 推进量压低 ~24%，匀速 300pt/s 时偏离
+    /// 真值 ~7pt 并在每个上报间隔内制造 ~15Hz 锯齿；过冲防护由时距封顶 +
+    /// 新样本到达即校正承担（方案 §5）。
+    /// - Returns: 外推点（Δt 内部封顶 `maxDisplayExtrapolation`，封顶后原地保持；
+    ///   时钟回拨按 Δt=0 处理）；滤波器未初始化（尚无输出或已 `reset()`）返回 nil
+    public func displayExtrapolation(at t: Double) -> CGPoint? {
+        guard let prev = lastOut, let t0 = lastT else { return nil }
+        let dt = min(max(t - t0, 0), Self.maxDisplayExtrapolation)
+        return CGPoint(x: prev.x + coastVel.0 * dt, y: prev.y + coastVel.1 * dt)
     }
 
     /// 回到未初始化状态；下一帧样本直接透传并作为新基线
