@@ -59,6 +59,10 @@ final class CameraStreamer: NSObject, ObservableObject {
     private let captureRecorder = CaptureRecorder()
     /// 当前连接的解析后地址（Bonjour 连接在 ready 后从 currentPath 取），采集上传用
     private var connectedHostPort: (NWEndpoint.Host, NWEndpoint.Port)?
+    /// TLV 传输（新协议，protocol.md §11）：tlvActive 时所有收发走它，旧 NWConnection 路径闲置
+    private let tlvTransport = TLVTransport()
+    /// 当前活跃链路是否为 TLV（过渡期双实现并存；旧实现 P3 拆除）
+    private var tlvActive = false
 
     /// 实时亮度调节：v ∈ 0...1 映射到 ISO [minISO, minISO × 10]
     func setBrightness(_ v: Float) {
@@ -120,6 +124,9 @@ final class CameraStreamer: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        // TLV 传输（新协议，protocol.md §11）：事件/控制回调接线，状态文案与旧路径一致
+        tlvTransport.onEvent = { [weak self] e in self?.handleTLVEvent(e) }
+        tlvTransport.onControl = { [weak self] data in self?.handleControl(data) }
         // 默认映射表：Calibrator 默认参数（markerSize 48 / inset 24，ADR-010）在 1728×1117 屏上的
         // 8 个标记中心（m+s/2 = 48；W/2 = 864；H/2 = 558.5；上中标记的刘海偏移由 Mac 下发修正）
         localizer.screenCornerMap = [
@@ -219,7 +226,63 @@ final class CameraStreamer: NSObject, ObservableObject {
                         label: "\(host):\(port)")
     }
 
-    /// Bonjour 发现的直连端点
+    /// TLV 链路连接（新协议，protocol.md §11；二维码 port2 字段走入）
+    func connectTLV(host: String, port: UInt16) {
+        guard !isConnecting else { return }
+        suppressAutoConnect = false   // 显式连接：恢复自动发现
+        tlvActive = true
+        isConnecting = true
+        connectionError = false
+        statusText = "连接中… \(host):\(port)（TLV）"
+        tlvTransport.connect(host: host, port: port)
+    }
+
+    /// TLV 链路连接（Bonjour 发现的 `_aimphone2._tcp` 端点；不动 suppressAutoConnect，
+    /// 自动发现路径的抑制检查在浏览回调里完成）
+    private func connectTLVEndpoint(_ endpoint: NWEndpoint, label: String) {
+        guard !isConnecting else { return }
+        tlvActive = true
+        isConnecting = true
+        connectionError = false
+        statusText = "连接中… \(label)"
+        tlvTransport.connect(endpoint: endpoint, label: label)
+    }
+
+    /// TLV 传输事件 → UI 状态（已在主线程；语义与旧路径 stateUpdateHandler 分支一一对应）
+    private func handleTLVEvent(_ e: TLVTransport.Event) {
+        switch e {
+        case .ready(let label):
+            isConnecting = false
+            isConnected = true
+            connectionError = false
+            streamPaused = false   // 新连接复位推流暂停，避免"连上但没画面"
+            statusText = "已连接 \(label)（TLV）"
+            // 连上后停止 Bonjour 浏览（新旧两个都停）
+            browser?.cancel()
+            browser = nil
+            legacyBrowser?.cancel()
+            legacyBrowser = nil
+        case .waiting:
+            statusText = "等待网络…（若弹出本地网络授权请点允许）"
+        case .retrying(let text):
+            statusText = text
+        case .failed(let text):
+            isConnecting = false
+            connectionError = true
+            statusText = text
+        case .disconnected(let text):
+            // NOTE: 与旧路径一致——已建立的连接意外断开必须清状态，
+            // 否则 isConnected 卡 true，扫码按钮被隐藏、scanQRCode 被 guard 拦截
+            isConnected = false
+            tlvActive = false
+            pairingQRVisibleOnMac = false
+            connectionError = true
+            statusText = "连接已断开: \(text)"
+            startBrowsing()   // 非手动断开：允许 Bonjour 自动找回
+        }
+    }
+
+    /// Bonjour 发现的直连端点（旧协议，P3 随旧链路拆除）
     func connectEndpoint(_ endpoint: NWEndpoint, label: String) {
         guard !isConnecting else { return }
         retryCount = 0
@@ -251,9 +314,11 @@ final class CameraStreamer: NSObject, ObservableObject {
                     if case .hostPort(let host, let port) = conn.currentPath?.remoteEndpoint {
                         self.connectedHostPort = (host, port)
                     }
-                    // 连上后停止 Bonjour 浏览
+                    // 连上后停止 Bonjour 浏览（新旧两个都停）
                     self.browser?.cancel()
                     self.browser = nil
+                    self.legacyBrowser?.cancel()
+                    self.legacyBrowser = nil
                     // 控制信道：接收 Mac 下发的标定映射表（docs/protocol.md §6）
                     self.receiveControl(conn)
                 case .failed(let e):
@@ -310,15 +375,48 @@ final class CameraStreamer: NSObject, ObservableObject {
 
     // MARK: Bonjour 自动发现（无需 IP，主方案）
     private var browser: NWBrowser?
+    /// 旧协议服务浏览器（`_aimphone._tcp` 回退路径，P3 随旧链路拆除）
+    private var legacyBrowser: NWBrowser?
 
     func startBrowsing() {
         guard browser == nil else { return }
-        let b = NWBrowser(for: .bonjour(type: "_aimphone._tcp", domain: nil), using: .tcp)
+        // TLV 优先：先浏览 `_aimphone2._tcp`（新协议，protocol.md §11）；
+        // 3 秒未发现则并行回退浏览旧 `_aimphone._tcp`（旧版 Mac 兼容，过渡期双服务并存）
+        let b = NWBrowser(for: .bonjour(type: "_aimphone2._tcp", domain: nil), using: .tcp)
         browser = b
         b.browseResultsChangedHandler = { [weak self] results, _ in
             DispatchQueue.main.async {
                 guard let self, !self.isConnected, !self.isConnecting,
                       !self.suppressAutoConnect,   // 手动断开后不再自动重连
+                      let result = results.first else { return }
+                let label: String
+                if case .hostPort(let host, let port) = result.endpoint {
+                    label = "\(host):\(port)"
+                } else {
+                    label = "Bonjour 服务（TLV）"
+                }
+                self.statusText = "发现 Mac（\(label)），自动连接…"
+                self.connectTLVEndpoint(result.endpoint, label: label)
+            }
+        }
+        b.stateUpdateHandler = { state in
+            print("Bonjour browser (TLV): \(state)")
+        }
+        b.start(queue: .main)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.startLegacyBrowsing()
+        }
+    }
+
+    /// 旧协议服务浏览：仅作旧版 Mac（无 TLV 服务）的回退发现路径
+    private func startLegacyBrowsing() {
+        guard legacyBrowser == nil, !isConnected, !isConnecting else { return }
+        let b = NWBrowser(for: .bonjour(type: "_aimphone._tcp", domain: nil), using: .tcp)
+        legacyBrowser = b
+        b.browseResultsChangedHandler = { [weak self] results, _ in
+            DispatchQueue.main.async {
+                guard let self, !self.isConnected, !self.isConnecting,
+                      !self.suppressAutoConnect,
                       let result = results.first else { return }
                 let label: String
                 if case .hostPort(let host, let port) = result.endpoint {
@@ -331,7 +429,7 @@ final class CameraStreamer: NSObject, ObservableObject {
             }
         }
         b.stateUpdateHandler = { state in
-            print("Bonjour browser: \(state)")
+            print("Bonjour browser (legacy): \(state)")
         }
         b.start(queue: .main)
     }
@@ -342,7 +440,13 @@ final class CameraStreamer: NSObject, ObservableObject {
         isConnecting = false
         connectionError = false
         retryCount = 0
-        if let conn = connection, isConnected {
+        if tlvActive {
+            // TLV 链路：transport 内部补发 mouseUp all + disconnect 兜底帧
+            //（protocol.md §7/§8，ADR-008），lastMessage 收尾保证通知帧先于 FIN
+            tlvTransport.disconnectGracefully()
+            tlvActive = false
+            connection = nil
+        } else if let conn = connection, isConnected {
             // 先通知 Mac「手机主动断开」（protocol.md §7 disconnect），Mac 收到后
             // 重新显示配对二维码并刷新为当前 IP；finalMessage 保证通知帧先于 FIN 发出。
             // 断开前对鼠标键补发 up-all 兜底（§8，ADR-008）：防止按住中时断连导致 Mac 键卡死
@@ -384,6 +488,11 @@ final class CameraStreamer: NSObject, ObservableObject {
 
     // MARK: 帧处理与发送
     private func send(jpeg: Data) {
+        if tlvActive {
+            tlvTransport.send(jpeg: jpeg)
+            DispatchQueue.main.async { self.framesSent += 1 }
+            return
+        }
         guard let conn = connection else { return }
         var len = UInt32(jpeg.count).bigEndian
         let header = Data(bytes: &len, count: 4)
@@ -423,14 +532,17 @@ extension CameraStreamer {
     }
 
     private func handleQRText(_ text: String) {
-        // 支持两种格式：JSON {"host":"...","port":9100} 或裸文本 host:port
+        // 支持两种格式：JSON {"host":"...","port":9100,"port2":9102} 或裸文本 host:port
+        // port2 = TLV 服务端口（protocol.md §11，过渡期字段；旧版 Mac 二维码无此字段则走旧协议）
         var host: String?
         var port: UInt16?
+        var tlvPort: UInt16?
         if let data = text.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let h = json["host"] as? String,
            let p = (json["port"] as? Int).flatMap({ UInt16(exactly: $0) }) {
             host = h; port = p
+            tlvPort = (json["port2"] as? Int).flatMap { UInt16(exactly: $0) }
         } else {
             let parts = text.split(separator: ":")
             if parts.count == 2, let p = UInt16(parts[1]) {
@@ -441,16 +553,26 @@ extension CameraStreamer {
             statusText = "发现二维码但无法解析: \(text.prefix(40))"
             return
         }
-        statusText = "扫码成功 \(h):\(p)，连接中…"
-        onScanned?(h, p)      // 回调 UI 回填输入框
-        connect(host: h, port: p)
+        if let tp = tlvPort {
+            statusText = "扫码成功 \(h):\(tp)（TLV），连接中…"
+            onScanned?(h, tp)      // 回调 UI 回填输入框
+            connectTLV(host: h, port: tp)
+        } else {
+            statusText = "扫码成功 \(h):\(p)，连接中…"
+            onScanned?(h, p)      // 回调 UI 回填输入框
+            connect(host: h, port: p)
+        }
     }
 }
 
 // MARK: - 本机识别（iOS 端坐标转换测试）+ 控制信道
 extension CameraStreamer {
-    /// 通用控制帧发送（iPhone → Mac，长度字最高位置 1，protocol.md §7）
+    /// 通用控制帧发送（iPhone → Mac；TLV 链路走 type 1，旧链路长度字最高位置 1，protocol.md §7/§11）
     private func sendControl(_ obj: [String: Any]) {
+        if tlvActive {
+            tlvTransport.sendControl(obj)
+            return
+        }
         guard let conn = connection, isConnected,
               let json = try? JSONSerialization.data(withJSONObject: obj) else { return }
         var len = (UInt32(json.count) | 0x8000_0000).bigEndian
@@ -532,9 +654,17 @@ extension CameraStreamer {
         }
     }
 
-    /// 结束采集并上传到 Mac:port+1（captureStop 控制帧与到点自动停止共用，videoQueue 上调用）
+    /// 结束采集并上传（captureStop 控制帧与到点自动停止共用，videoQueue 上调用）。
+    /// TLV 链路并入主连接（type 10/11，§11）；旧链路走 Mac:port+1 第二条 TCP（§10，P3 拆除）
     private func finishCaptureAndUpload(dir: URL, frames: Int) {
         DispatchQueue.main.async { self.statusText = "采集完成（\(frames) 帧），上传中…" }
+        if tlvActive {
+            tlvTransport.uploadCapture(dir: dir, total: frames,
+                                       peakRotRate: captureRecorder.peakRotRate) { [weak self] text in
+                self?.statusText = text
+            }
+            return
+        }
         guard let (host, port) = connectedHostPort,
               let upPort = NWEndpoint.Port(rawValue: port.rawValue + 1) else {
             DispatchQueue.main.async { self.statusText = "采集上传失败：无对端地址" }

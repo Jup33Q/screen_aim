@@ -750,13 +750,14 @@ final class CaptureServer {
     }
 }
 
+
 // MARK: - 透明悬浮标定层
 /// 全屏透明、点击穿透的悬浮窗口：四角 + 四边中点共 8 个悬浮 ArUco 标记（ADR-007）
 /// +（推流模式）中央配对二维码。
 ///
 /// - 每个标记自带白色圆角底卡，保证任意桌面背景下的 ArUco 静区（WARNING: 无静区无法检测）
 /// - 标记中心坐标自动写入 `ScreenSampler.screenCornerMap`，无需手工标定
-/// - 配对二维码内容 `{"host":ip,"port":port}`，IP 每 5 秒轮询、变化即重生成
+/// - 配对二维码内容 `{"host":ip,"port":port,"port2":port+2}`（port2 = TLV 端口，过渡期），IP 每 5 秒轮询、变化即重生成
 /// - `run()` 阻塞进 NSApp 主循环，ESC 退出
 final class Calibrator: NSObject {
     var markerSize: CGFloat   // 标记边长（点），滑杆实时调整
@@ -783,6 +784,15 @@ final class Calibrator: NSObject {
     /// iPhone 数据流瞄准点白点覆盖层：位置完全来自 protocol.md §7 localAim 上报
     /// （手机本机识别结果），与 Mac 端视频帧识别管线无关；无瞄准点/断连时隐藏
     var aimDot: NSView?
+    /// 白点输出二段 One Euro 滤波：iPhone 端 ScreenLocalizer 已过滤一段，
+    /// 但 localAim 上报仅 ≈15Hz（ADR-009）且 TCP 到达间隔抖动，直接摆点有步进感；
+    /// 桌面端再过滤一段让轨迹丝滑（速度自适应，横扫靠 beta 不拖）。
+    /// 白点每次隐藏（断连）即重置，恢复后从最新瞄准点重新开始，
+    /// 不被过期状态拖走；无瞄准点则按连续 10 帧才重置（与 ScreenSampler.registerNoAim
+    /// 同策略），单帧掉检抖动不打断滤波状态
+    var dotFilterX = OneEuroFilter(), dotFilterY = OneEuroFilter()
+    /// 连续无瞄准点的 localAim 帧计数（主线程访问）：≥10 才重置 dotFilter
+    private var dotNoAimFrames = 0
     var centers: [CGPoint] = []        // 当前 8 个标记中心的屏幕点坐标（左上角原点）
     var markerCards: [NSView] = []     // 当前 8 块白卡视图（rebuildMarkers 重建）
     /// 当前被识别到（激活）的标记 ID 集合：setMarkerActivation 增量比对，仅翻转项发动画
@@ -1068,7 +1078,8 @@ final class Calibrator: NSObject {
         window = win
         // 配对二维码（仅手机推流模式）：圆角方形卡，屏幕正中央，手机扫码自动获取 IP/端口
         if let port = servePort, let ip = primaryIPv4() {
-            let payload = "{\"host\":\"\(ip)\",\"port\":\(port)}"
+            // port2 = TLV 服务端口（过渡期并存，protocol.md §11）；旧版手机忽略未知字段
+            let payload = "{\"host\":\"\(ip)\",\"port\":\(port),\"port2\":\(port + 2)}"
             let qrSide: CGFloat = 190
             let cardSide: CGFloat = 250
             let card = NSView(frame: NSRect(x: (W - cardSide) / 2, y: (H - cardSide) / 2,
@@ -1094,7 +1105,7 @@ final class Calibrator: NSObject {
             // IP 变化看守：每 5 秒检查一次，IP 变了自动重新生成二维码
             refreshQRNow = { [weak self] in
                 guard let self, let ip = primaryIPv4() else { return }
-                let newPayload = "{\"host\":\"\(ip)\",\"port\":\(port)}"
+                let newPayload = "{\"host\":\"\(ip)\",\"port\":\(port),\"port2\":\(port + 2)}"
                 guard newPayload != self.currentPayload else { return }
                 self.currentPayload = newPayload
                 self.rebuildQR(payload: newPayload, side: qrSide)
@@ -1160,11 +1171,13 @@ final class Calibrator: NSObject {
                 // 此前 onFrame 在 conn 队列同步执行，识别一帧期间不收下一帧，
                 // TCP 缓冲积压 → 延迟累积、有效帧率远低于手机端。改为 busy 标志 +
                 // 独立队列：处理中时新到的视频帧直接丢弃（视频帧可丢；控制帧在
-                // FrameServer 内联分发，不受此影响）
+                // FrameServer 内联分发，不受此影响）。
+                // NOTE: 过渡期新旧两个服务（9100 手工分帧 / port+2 TLV）共用同一套丢帧
+                // 守卫与处理队列——同一时刻只有一条链路在推流，竞争退化为旧帧丢弃
                 let frameBusy = NSLock()
                 var frameInFlight = false
                 let frameQueue = DispatchQueue(label: "screenaim.frames")
-                let server = FrameServer(port: port) { [sampler] jpeg in
+                let processFrame: (Data) -> Void = { [sampler] jpeg in
                     frameBusy.lock()
                     if frameInFlight { frameBusy.unlock(); return }
                     frameInFlight = true
@@ -1173,6 +1186,15 @@ final class Calibrator: NSObject {
                         sampler.processJPEG(jpeg)
                         frameBusy.lock(); frameInFlight = false; frameBusy.unlock()
                     }
+                }
+                let server = FrameServer(port: port, onFrame: processFrame)
+                // TLV 单连接服务（protocol.md §11，过渡期与旧服务并行，ADR-011 ①）：
+                // 回调面与旧 FrameServer/CaptureServer 对齐，下方 Calibrator 接线两份共享
+                let serverV2 = FrameServerV2(port: port + 2, onFrame: processFrame)
+                // 控制消息广播：过渡期新旧链路并存，calib/pairingQR/capture* 同步发两边
+                let broadcastControl: ([String: Any]) -> Void = { obj in
+                    server.sendControl(obj)
+                    serverV2.sendControl(obj)
                 }
                 // 瞄准点绑定光标（--aim-cursor）：手机帧识别出的屏幕点直接 warp 鼠标，
                 // 与 §8 触控点击配合 = 手机瞄哪里点哪里。瞄准点是主屏点坐标（左上角原点），
@@ -1191,23 +1213,32 @@ final class Calibrator: NSObject {
                 server.handshakePayload = { [weak self] in
                     self?.calibPayload()
                 }
+                serverV2.handshakePayload = server.handshakePayload
                 // 配对二维码可见性：任何变化都同步推送给所有已连手机（按钮高亮跟随真实状态）
                 let setQRVisible: (Bool) -> Void = { [weak self] visible in
                     guard let self, let card = self.qrCard, card.isHidden == visible else { return }
                     card.isHidden = !visible
                     // 图标态：白 = 二维码可见，灰 = 已隐藏
                     self.qrButton?.contentTintColor = visible ? .white : NSColor.white.withAlphaComponent(0.4)
-                    server.sendControl(["type": "pairingQR", "visible": visible])
+                    broadcastControl(["type": "pairingQR", "visible": visible])
                     print(visible ? "配对二维码已显示" : "配对二维码已隐藏")
                 }
                 server.onConnect = {
                     setQRVisible(false)   // 配对成功，隐藏二维码并广播状态
+                }
+                serverV2.onConnect = { [weak self] in
+                    setQRVisible(false)   // 配对成功，隐藏二维码并广播状态
+                    // 悬浮层 debug 胶囊显示链路来源（TLV/旧 TCP 由后续 localAim 文案自然覆盖）
+                    DispatchQueue.main.async {
+                        self?.debugLabel?.stringValue = "iPhone 瞄准: 已连接（TLV 通道）"
+                    }
                 }
                 // 连接断开（主动/被动统一，§8）：按住中的鼠标键补发 up，防键卡死
                 server.onDisconnect = { [weak self] in
                     self?.releaseStuckMouseButtons()
                     self?.setMarkerActivation([])   // 帧流中断，绿边全部失效
                 }
+                serverV2.onDisconnect = server.onDisconnect
 
                 // Mac 端配对码开关 + 退出应用按钮 + 采集按钮 + 定位码大小/不透明度滑杆 + 隐藏 UI 按钮：
                 // 主覆盖层点击穿透，所以单独用一个可点击的悬浮 NSPanel（屏幕顶部居中）
@@ -1283,13 +1314,13 @@ final class Calibrator: NSObject {
                 recBtn.onClick = { [weak self] in
                     guard let self else { return }
                     if self.capturing {
-                        server.sendControl(["type": "captureStop"])
+                        broadcastControl(["type": "captureStop"])
                     } else {
                         // label 只带 Mac 侧已知的标记参数；距离/运动语义由操作者事后改目录名补充
                         self.captureLabel = String(format: "m%d_i%d",
                                                    Int(self.markerSize), Int(self.inset))
-                        server.sendControl(["type": "captureStart", "seconds": 10, "fps": 5,
-                                            "label": self.captureLabel])
+                        broadcastControl(["type": "captureStart", "seconds": 10, "fps": 5,
+                                          "label": self.captureLabel])
                     }
                     self.capturing.toggle()
                     recBtn.contentTintColor = self.capturing ? .systemRed : .white
@@ -1340,7 +1371,7 @@ final class Calibrator: NSObject {
                         self.centers.enumerated().map { (Int32($0.offset), $0.element) })
                     if let data = self.calibPayload(),
                        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        server.sendControl(obj)   // 广播新标定表给所有已连手机（protocol.md §7）
+                        broadcastControl(obj)   // 广播新标定表给所有已连手机（protocol.md §7/§11）
                     }
                     sizeBadge.value = tick
                     print("定位码大小: \(tick)pt（滑杆调整，新标定表已广播）")
@@ -1441,8 +1472,9 @@ final class Calibrator: NSObject {
                 }
                 btnPanel.orderFrontRegardless()
                 objc_setAssociatedObject(win, "btnPanel", btnPanel, .OBJC_ASSOCIATION_RETAIN)
-                // 手机端控制消息（protocol.md §7/§8）：配对二维码开关 / 本机识别结果上报 / 鼠标模拟器
-                server.onControl = { [weak self] msg in
+                // 手机端控制消息（protocol.md §7/§8/§11）：配对二维码开关 / 本机识别结果上报 / 鼠标模拟器。
+                // src 为链路来源标签（旧链路 tcp / TLV 链路 tlv），只进 localAim CSV 的 src 列
+                let handlePhoneControl: ([String: Any], String) -> Void = { [weak self] msg, src in
                     switch msg["type"] as? String {
                     case "mouseDown", "mouseUp":
                         // 横屏鼠标模拟器（§8）：按下/抬起分离注入，支持拖拽；
@@ -1484,6 +1516,9 @@ final class Calibrator: NSObject {
                         self?.releaseStuckMouseButtons()   // §8：按住中断连，补发 up 防键卡死
                         DispatchQueue.main.async {
                             self?.aimDot?.isHidden = true   // 数据流中断，白点隐藏
+                            self?.dotFilterX.reset()        // 滤波器随白点隐藏重置，重连后不被过期状态拖走
+                            self?.dotFilterY.reset()
+                            self?.dotNoAimFrames = 0
                             self?.setMarkerActivation([])   // 绿边全部失效
                             self?.refreshQRNow?()
                             setQRVisible(true)
@@ -1500,17 +1535,22 @@ final class Calibrator: NSObject {
                             print(String(format: "LOCALAIM iPhone: screen=(%.1f, %.1f) markers=%d/8 detected=%@ det=%.1fms",
                                          x, y, n, detected.map(String.init).joined(separator: ","), detMs))
                             self?.logLocalAim(markers: n, ids: detected, x: x, y: y,
-                                              detectMs: detMs, src: "tcp")
+                                              detectMs: detMs, src: src)
                             let text = String(format: "iPhone 瞄准: (%.1f, %.1f)  标记 %d/8", x, y, n)
                             DispatchQueue.main.async { [weak self] in
                                 self?.debugLabel?.stringValue = text
                                 self?.debugLabel?.textColor = .white
-                                // 白点直接取 iPhone 数据流的瞄准点（全精度 Double，非 debug 取整值）；
+                                // 白点取 iPhone 数据流的瞄准点（全精度 Double，非 debug 取整值），
+                                // 先过二段 One Euro 滤波消除 ≈15Hz 上报的步进感（时间戳取到达墙钟）；
                                 // 屏幕点坐标左上角原点 → AppKit 左下角原点，y 翻转；钳制在屏内
                                 if let dot = self?.aimDot {
+                                    self?.dotNoAimFrames = 0
+                                    let t = CACurrentMediaTime()
+                                    let fx = self?.dotFilterX.filter(x, at: t) ?? x
+                                    let fy = self?.dotFilterY.filter(y, at: t) ?? y
                                     let d = dot.frame.width
-                                    let cx = min(max(CGFloat(x), 0), W - 1)
-                                    let cy = min(max(CGFloat(y), 0), H - 1)
+                                    let cx = min(max(CGFloat(fx), 0), W - 1)
+                                    let cy = min(max(CGFloat(fy), 0), H - 1)
                                     dot.frame = NSRect(x: cx - d / 2, y: H - cy - d / 2,
                                                        width: d, height: d)
                                     dot.isHidden = false
@@ -1522,17 +1562,29 @@ final class Calibrator: NSObject {
                             print(String(format: "LOCALAIM iPhone: 检出不足（%d 个，缺 [%@]），无瞄准点 det=%.1fms",
                                          n, missStr, detMs))
                             self?.logLocalAim(markers: n, ids: detected, x: nil, y: nil,
-                                              detectMs: detMs, src: "tcp")
+                                              detectMs: detMs, src: src)
                             DispatchQueue.main.async { [weak self] in
                                 self?.debugLabel?.stringValue = "iPhone 瞄准: 缺定位码 [\(missStr)]（检出 \(n)/8）"
                                 self?.debugLabel?.textColor = .systemYellow
                                 self?.aimDot?.isHidden = true   // 无瞄准点，白点隐藏
+                                // 连续 10 帧无瞄准点才重置滤波器：单帧掉检不重置，
+                                // 恢复后白点从滤波状态平滑出现而非跳变
+                                if let s = self {
+                                    s.dotNoAimFrames += 1
+                                    if s.dotNoAimFrames >= 10 {
+                                        s.dotFilterX.reset()
+                                        s.dotFilterY.reset()
+                                        s.dotNoAimFrames = 0
+                                    }
+                                }
                             }
                         }
                     default:
                         break
                     }
                 }
+                server.onControl = { msg in handlePhoneControl(msg, "tcp") }
+                serverV2.onControl = { msg in handlePhoneControl(msg, "tlv") }
                 // 监听失败（典型：端口被旧实例占用）→ 弹窗说明并退出，
                 // 绝不留着没有服务能力的二维码继续显示（僵尸二维码）
                 server.onListenerFailed = { err in
@@ -1544,8 +1596,19 @@ final class Calibrator: NSObject {
                     alert.runModal()
                     NSApp.terminate(nil)
                 }
+                serverV2.onListenerFailed = { err in
+                    let alert = NSAlert()
+                    alert.messageText = "TLV 帧服务启动失败（端口 \(port + 2)）"
+                    alert.informativeText = "\(err.localizedDescription)\n\n通常是已有另一个 ScreenAim 实例正在运行。请先退出旧实例（或在其窗口按 ESC），再启动本实例。"
+                    alert.alertStyle = .critical
+                    alert.addButton(withTitle: "退出")
+                    alert.runModal()
+                    NSApp.terminate(nil)
+                }
                 try server.start()
+                try serverV2.start()
                 objc_setAssociatedObject(win, "server", server, .OBJC_ASSOCIATION_RETAIN)
+                objc_setAssociatedObject(win, "serverV2", serverV2, .OBJC_ASSOCIATION_RETAIN)
                 // 采集回传服务（protocol.md §10）：与帧服务同机，端口 +1
                 let captureServer = CaptureServer(port: port + 1)
                 captureServer.sessionInfo = { [weak self, sampler] in
@@ -1564,6 +1627,9 @@ final class Calibrator: NSObject {
                     self?.capturing = false
                     self?.captureButton?.contentTintColor = .white
                 }
+                // TLV 路径采集回传并入主连接（type 10/11，protocol.md §11），回调面同源复用
+                serverV2.sessionInfo = captureServer.sessionInfo
+                serverV2.onCaptureDone = captureServer.onCaptureDone
                 try captureServer.start()
                 objc_setAssociatedObject(win, "captureServer", captureServer,
                                          .OBJC_ASSOCIATION_RETAIN)

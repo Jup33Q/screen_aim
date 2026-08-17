@@ -8,11 +8,14 @@
 
 /* Begin PBXBuildFile section */
 		21413713EAC1C6591477A25E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 935833E6F836BDAF47F01ED6 /* ContentView.swift */; };
+		442E3320E3C7EBD2DBEC36A8 /* TLVMessageType.swift in Sources */ = {isa = PBXBuildFile; fileRef = 509959D5A8A70C12D2B615A9 /* TLVMessageType.swift */; };
 		490D781163D39227149BE8F2 /* CaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A94852DF43A456C9363C28D7 /* CaptureRecorder.swift */; };
 		4B5E031A124025191EE682FF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 570CDB1B79715F6D759EFE6A /* Assets.xcassets */; };
 		4CFCCB77CF72136A2046BCCC /* AimPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E499E972D884E3FC90FB661A /* AimPhoneApp.swift */; };
+		7222F201DAFBE10E919315F8 /* TLVTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE5FD15A593B4D86618F3266 /* TLVTransport.swift */; };
 		A1A173954DDAB47019D8530B /* MarkerDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */; };
 		AC385CE5A40AF5BB787DBBF0 /* OneEuroFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54467DA7B5F1F7876F34FCC /* OneEuroFilter.swift */; };
+		AFB37EF52CF5389D28CA98D0 /* Info 2.plist in Resources */ = {isa = PBXBuildFile; fileRef = 016FD7C05212667336980E0E /* Info 2.plist */; };
 		BF520732211D33E182F3258D /* ScreenLocalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */; };
 		CF0C190E4FB427B2799F2E0A /* ArucoDictionary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */; };
 		E4AF9E8E8EA6ADEB992E7FAF /* GimbalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830EBE3C6A616155318C105A /* GimbalManager.swift */; };
@@ -21,7 +24,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		016FD7C05212667336980E0E /* Info 2.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Info 2.plist"; sourceTree = "<group>"; };
 		276ABCAE4B7D65A82CFB10A4 /* AimPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AimPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		509959D5A8A70C12D2B615A9 /* TLVMessageType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TLVMessageType.swift; sourceTree = "<group>"; };
 		570CDB1B79715F6D759EFE6A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		66C7BF78A1B7B2FE6F04640F /* ArucoDictionary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArucoDictionary.swift; sourceTree = "<group>"; };
 		671158DC7200C25D7D0D0139 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -34,6 +39,7 @@
 		F54467DA7B5F1F7876F34FCC /* OneEuroFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneEuroFilter.swift; sourceTree = "<group>"; };
 		F801D5BF510A50654CB415E0 /* CameraStreamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraStreamer.swift; sourceTree = "<group>"; };
 		FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkerDetector.swift; sourceTree = "<group>"; };
+		FE5FD15A593B4D86618F3266 /* TLVTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TLVTransport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -45,6 +51,7 @@
 				FC663980D258C61FF3B11BE8 /* MarkerDetector.swift */,
 				F54467DA7B5F1F7876F34FCC /* OneEuroFilter.swift */,
 				E8B936BF870A63ED43622845 /* ScreenLocalizer.swift */,
+				509959D5A8A70C12D2B615A9 /* TLVMessageType.swift */,
 			);
 			name = ScreenAimCore;
 			path = ../Sources/ScreenAimCore;
@@ -76,7 +83,9 @@
 				A94852DF43A456C9363C28D7 /* CaptureRecorder.swift */,
 				935833E6F836BDAF47F01ED6 /* ContentView.swift */,
 				830EBE3C6A616155318C105A /* GimbalManager.swift */,
+				016FD7C05212667336980E0E /* Info 2.plist */,
 				671158DC7200C25D7D0D0139 /* Info.plist */,
+				FE5FD15A593B4D86618F3266 /* TLVTransport.swift */,
 			);
 			path = AimPhone;
 			sourceTree = "<group>";
@@ -142,6 +151,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4B5E031A124025191EE682FF /* Assets.xcassets in Resources */,
+				AFB37EF52CF5389D28CA98D0 /* Info 2.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -162,6 +172,8 @@
 				A1A173954DDAB47019D8530B /* MarkerDetector.swift in Sources */,
 				AC385CE5A40AF5BB787DBBF0 /* OneEuroFilter.swift in Sources */,
 				BF520732211D33E182F3258D /* ScreenLocalizer.swift in Sources */,
+				442E3320E3C7EBD2DBEC36A8 /* TLVMessageType.swift in Sources */,
+				7222F201DAFBE10E919315F8 /* TLVTransport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -231,7 +243,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 4VF7272J66;
 				INFOPLIST_FILE = AimPhone/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -251,7 +263,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 4VF7272J66;
 				INFOPLIST_FILE = AimPhone/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

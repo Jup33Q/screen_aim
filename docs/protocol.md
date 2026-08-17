@@ -2,6 +2,10 @@
 
 iPhone（AimPhone）⇄ Mac（ScreenAim）之间的全部线上格式。改任何一端前对照本文。
 
+> **传输层迁移过渡期**（transport-26-plan，ADR-011/012）：§1/§2/§10 描述的 9100 手工分帧
+> 链路与 §11 的 TLV 消息通道**并行运行**（旧链路一行不改），TLV 回归通过后旧链路拆除
+> （届时本节相关条目标注"已移除"）。新写客户端一律按 §11。
+
 ## 1. 视频帧推送（iPhone → Mac）
 
 TCP 长连接，循环发送：
@@ -20,6 +24,8 @@ TCP 长连接，循环发送：
 ## 2. 服务发现（Bonjour）
 
 - Mac 发布：`_aimphone._tcp`，服务名 `AimPhone-Mac`（`FrameServer.start()`）
+- **过渡期并行**：TLV 服务发布 `_aimphone2._tcp`（端口 servePort+2，`FrameServerV2`）；
+  iPhone 优先浏览 `_aimphone2._tcp`，3 秒未发现再回退浏览 `_aimphone._tcp`（旧版 Mac 兼容）
 - iPhone 浏览同类型，发现即自动连接；连接成功后停止浏览
 - **手动断开后不再自动重连**（`suppressAutoConnect`），用户显式连接（按钮/扫码/云台翻转键）后才恢复自动发现
 - 手动兜底：App 界面输入 IP/端口直连，或扫码配对
@@ -29,8 +35,12 @@ TCP 长连接，循环发送：
 Mac 悬浮层中央显示二维码（Calibrator），内容为 JSON：
 
 ```json
-{"host":"192.168.1.100","port":9100}
+{"host":"192.168.1.100","port":9100,"port2":9102}
 ```
+
+- `port`：旧手工分帧服务端口（9100）；`port2`：TLV 服务端口（过渡期字段，servePort+2）
+- 新版 iPhone 见 `port2` 即走 §11 TLV 通道；旧版 iPhone 忽略未知字段，仍连 `port`（向后兼容）
+- P3 拆旧链路后 TLV 服务收敛回 9100 单端口，`port` 即 TLV 端口，`port2` 字段移除
 
 iPhone 端 `CameraStreamer.handleQRText` 兼容两种格式：
 1. 上述 JSON（主方案）
@@ -186,6 +196,9 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 
 **回传**（iPhone → Mac，新 TCP 连接，端口 = 帧服务端口 + 1）：
 
+> TLV 链路（§11）下无独立回传连接：采集记录并入主 TLV 连接（type 10/11），
+> 复合 payload 一次传递。本节以下为旧链路格式，过渡期保留。
+
 ```
 [4B 大端 jsonLen][json][4B 大端 binLen][bin]   × N 条记录
 ```
@@ -197,3 +210,55 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
   （frames/NNNN.png + meta.jsonl + session.json〔双端元信息合并〕），
   中途断连按已收帧数兜底收尾
 - 回放：`ScreenAim --replay <目录>`（离线重跑检测器 + OpenCV 参照，见 development.md）
+
+## 11. TLV 消息通道（iOS 26 / macOS 26+，迁移主路径）
+
+Network.framework 26+ 结构化并发 API（NetworkListener / NetworkConnection）+ 内置 TLV
+分帧器。单连接承载全部流量，框架托管分帧/消息边界/长度校验/背压（`try await send`
+挂起即背压），手工 `readHeader/readBody` 状态机与"长度字最高位当标志位"整体作废。
+
+**线上格式**（网络字节序，每条消息 8 字节头）：
+
+```
+┌──────────────┬────────────────┬──────────────────┐
+│ type: UInt32 │ length: UInt32 │ value: [UInt8]   │
+│ 4 字节        │ 4 字节          │ length 字节       │
+└──────────────┴────────────────┴──────────────────┘
+```
+
+**type 路由表**（`TLVMessageType`，ScreenAimCore 双端共享常量）：
+
+| type | 方向 | 内容 |
+|---|---|---|
+| 0 | iPhone→Mac | 视频帧 JPEG（≈15fps，参数同 §1） |
+| 1 | 双向 | 控制 JSON：calib↓/pairingQR↓/captureStart·Stop↓，togglePairingQR/localAim/mouse*/disconnect↑（消息 schema 与 §6/§7/§8 完全一致，仅分帧方式改变） |
+| 2 | （预留） | Coder(AimMessage) 信封枚举，P3 评估启用 |
+| 10 | iPhone→Mac | 采集 session/end 记录（纯 JSON，schema 同 §10） |
+| 11 | iPhone→Mac | 采集帧复合 payload：`[4B 大端 jsonLen][json][PNG]`（json = meta.jsonl 一行） |
+
+- 接收方遇未知 type 一律忽略（向后兼容机制：新版新增的 type 不应使旧端断连）
+- 断开兜底语义不变：iPhone 主动断开前发 `mouseUp all` + `disconnect`（type 1），
+  以 `lastMessage` 收尾保证通知帧先于 FIN（等价旧路径 finalMessage）；
+  Mac 端连接终结时对按住中的鼠标键补发 up（ADR-008）
+- 采集落盘目录结构与 session.json 合并逻辑与 §10 完全一致（`CaptureIngestor`），
+  `--replay` 回放路径不变
+- localAim CSV 的 `src` 列：TLV 链路记 `tlv`，旧链路记 `tcp`
+- 看门狗语义保留：5s×6 重试（`establishmentReport` 与超时竞争），
+  本地网络授权弹窗期卡死问题在 Bonjour/IP 路径依然存在（§4）
+- **两端必须 `TCP().noDelay(true)`**：新 API 的 `TCP()` 默认 Nagle 开启，会把 15fps 的
+  小控制消息攒批成 ~200ms 一坨（真机实测 localAim 批量突发、白点阶梯滞后）
+
+**过渡期端口与服务**：
+
+| 端口 | 服务 | 协议 |
+|---|---|---|
+| 9100（servePort） | `_aimphone._tcp` | 旧手工分帧（§1/§7/§10），P3 拆除 |
+| 9101（servePort+1） | — | 旧采集回传（§10），P3 拆除 |
+| 9102（servePort+2） | `_aimphone2._tcp` | **TLV（本节）**，P3 后收敛回 9100 与 `_aimphone._tcp` |
+
+## 12. Wi-Fi Aware 通道（已终止，待生态成熟）
+
+P0 尖刺结论：Wi-Fi Aware 在 macOS 不可用（Xcode 26.6 SDK 全符号
+`@available(macOS, unavailable)`，系统框架为空壳），Mac 无法做 WA publisher，
+通道整体终止（ADR-012）。恢复条件与设计底稿见 transport-26-plan §3；
+复测入口 `tools/wa-spike/run.sh`（SDK 开放 macOS 后编译通过即推翻信号）。

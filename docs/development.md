@@ -31,7 +31,7 @@ cd ios && xcodegen generate     # 改了 project.yml 后重新生成
 open ios/AimPhone.xcodeproj     # 选 Development Team，部署真机
 ```
 
-验证要求：iPhone 12+（SE 3/16e 不支持 DockKit）+ iOS 17+（建议 18）。
+验证要求：iPhone 12+（SE 3/16e 不支持 DockKit）+ **iOS 26+**（传输层 TLV API 门槛，ADR-011 ②；DockKit 下限 17.4 已包含）。
 DockKit 行为**模拟器无法验证**；模拟器构建自动降级为空操作属预期。
 
 ## 联调实测基准（本机 1728×1117，1280 宽降采样）

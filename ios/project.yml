@@ -5,7 +5,9 @@ targets:
   AimPhone:
     type: application
     platform: iOS
-    deploymentTarget: "17.0"
+    # 传输层迁移（transport-26-plan）：TLV framer / NetworkConnection 新 API 需 iOS 26+
+    #（ADR-011 ②：部署目标升 26.0，无双栈守卫；DockKit 下限 17 仍满足）
+    deploymentTarget: "26.0"
     sources:
       - AimPhone
       # 纯 Swift 定位核（ArUco 检测 + 单应映射）：与 Mac 端 SwiftPM 共享同一份源码
@@ -18,6 +20,8 @@ targets:
         NSLocalNetworkUsageDescription: "需要自动发现并连接局域网内的 Mac 传输画面"
         NSBonjourServices:
           - "_aimphone._tcp."
+          # TLV 服务（新协议主路径，protocol.md §11；过渡期与旧服务并行）
+          - "_aimphone2._tcp."
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

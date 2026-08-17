@@ -31,6 +31,10 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `ScreenLocalizer` | 检测→映射→滤波编排：`screenCornerMap` ≥4 项即可；输出侧内嵌 One Euro 滤波（`aimFilterEnabled` 可关，`aimFilterX/Y` 可调参） |
 | `OneEuroFilter` | One Euro 低通（minCutoff=1.0 / beta=0.5 / dCutoff=1.0），时间戳外部传入；连续 10 帧无输出由 Localizer/Sampler 重置 |
 | `ArucoDictionary` | id0–7 位图表 + 4 旋转查表（精确 → 汉明距 1 纠错） |
+| `TLVMessageType` | TLV 消息类型号（protocol.md §11）：video=0 / control=1 / captureMeta=10 / captureFrame=11；线上常量双端共享 |
+
+| `FrameServerV2` | TLV 单连接帧服务（protocol.md §11，过渡期端口 servePort+2，Bonjour `_aimphone2._tcp`）：NetworkListener + 内置 TLV framer，`messages` 按 type 分发 0/1/10/11；回调面与旧 `FrameServer`/`CaptureServer` 对齐（onFrame/onConnect/onControl/onDisconnect/handshakePayload/onListenerFailed/sessionInfo/onCaptureDone），Calibrator 接线无差别；**`TCP().noDelay(true)` 必开**（§11） |
+| `CaptureIngestor` | 采集落盘器（type 10/11 路径）：与旧 `CaptureServer.IngestSession` 同源逻辑，落盘 `scenes/capture_*/` 三件套；P3 拆旧链路后唯一存续 |
 
 ### `Sources/ScreenAim/main.swift`
 
@@ -59,18 +63,26 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `CameraAvailability` | unknown / available / unauthorized / failed(String)，驱动兜底 UI |
 | `setBrightness(_:)` | v∈0...1 → ISO [minISO, minISO×10]，手动曝光 1/120s 不变 |
 | `setZoomFactor` / `flipCamera` / `toggleStreamPaused` | 云台按键映射的相机操作 |
-| `connect(host:port:)` / `connectEndpoint(_:label:)` / `disconnect()` | 连接管理（5s 看门狗 + 6 次重试） |
-| `startBrowsing()` | Bonjour 自动发现（主方案） |
+| `connect(host:port:)` / `connectTLV(host:port:)` / `connectEndpoint(_:label:)` / `disconnect()` | 连接管理（5s 看门狗 + 6 次重试）；`connectTLV` 走新协议（§11，二维码 port2 / `_aimphone2._tcp` 走入），手动输入/无 port2 二维码走旧协议 |
+| `startBrowsing()` | Bonjour 自动发现：优先 `_aimphone2._tcp`（TLV），3s 未发现回退 `_aimphone._tcp`（旧版 Mac 兼容） |
 | `scanQRCode()` / `cancelScan()` | 主动扫码（5 秒窗口逐帧搜索）；未连接时也有 0.3s 间隔的被动扫码 |
 | `onScanned` | 扫码成功回调（UI 回填地址） |
 | `localizeFrame(_:timestamp:)` | 逐帧本机识别 + localAim 每帧上报（不抽稀 ≈15Hz，ADR-009）+ 采集抽帧入口 |
 | `sendMouseDown/Up` / `sendMouseScroll` / `sendMouseClick` | 横屏鼠标模拟器上报（§8）：按下/抬起分离（`button:"all"` 为断连兜底，ADR-008）、滚轮刻度；`sendMouseClick` 为旧协议保留 |
 
+### `TLVTransport.swift`
+
+TLV 单连接传输（protocol.md §11，CameraStreamer 的新协议收发核心）：NetworkConnection +
+内置 TLV framer；看门狗重试（5s×6，establishmentReport 与超时竞争）；`send(jpeg:)` type 0 /
+`sendControl` type 1（sendIdempotent）/ `uploadCapture` type 10/11（await send 串行背压，
+并入主连接无第二端口）；`disconnectGracefully` 补发 mouseUp all + disconnect 并以
+lastMessage 收尾（ADR-008 语义不变）。事件/控制回调全部主线程派发。
+
 ### `CaptureRecorder.swift`
 
-真机数据采集（protocol.md §10）：Mac 控制帧触发，无损 PNG + meta.jsonl 录到临时目录，
-录完经 port+1 第二条 TCP 上传 Mac。全部在 `aimphone.capture` 队列，UI 零改动
-（进度复用 `statusText`）。
+真机数据采集（protocol.md §10/§11）：Mac 控制帧触发，无损 PNG + meta.jsonl 录到临时目录；
+TLV 链路经主连接 type 10/11 上传（`TLVTransport.uploadCapture`），旧链路经 port+1 第二条
+TCP 上传（P3 拆除）。全部在 `aimphone.capture` 队列，UI 零改动（进度复用 `statusText`）。
 
 ### `GimbalManager.swift`
 

@@ -2,6 +2,39 @@
 
 每条 = 决策 + 原因 + 推翻它之前要满足的条件。按时间倒序。
 
+## ADR-012 Wi-Fi Aware 通道终止：macOS SDK 层不可用（P0 尖刺结论）
+
+- **决策**（2026-08-17 P0 尖刺）：ADR-011 之③（WA 升首选通道）**终止**。
+  传输主路径降级为 **TLV + Bonjour**（`_aimphone2._tcp` 过渡期 + 9100 单端口收敛），
+  扫码/手工 IP 永久兜底不变；WA 归档"待生态成熟"。TLV 部分（ADR-011 ①②④）不受影响。
+- **原因**（三条独立证据，复现脚本 `tools/wa-spike/`）：
+  ① Xcode 26.6 SDK 中 `WiFiAware.framework` 全部公开符号（`WACapabilities` /
+  `WAPublishableService` / `WASubscribableService` 等 29 处）标注
+  `@available(macOS, unavailable)`（iOS 26.0+ 可用，macCatalyst 亦不可用）——
+  Mac 端代码**编译期**即无法引用，包壳 .app 也救不了；
+  ② macOS 26 Network.framework 接口只有 `NWError.wifiAware` 错误码，没有
+  `.wifiAware` 端点描述符与 `NWParameters.wifiAware` 选项——Mac 做不了 WA listener/publisher；
+  ③ 运行系统（macOS 26.6.1）上 `/System/Library/Frameworks/WiFiAware.framework`
+  是无二进制的空壳（仅 Resources + 签名）。
+  注：skills/wifi-aware-pairing 所引"macOS 26.0 支持"（论坛 827887）与 SDK 事实矛盾，以 SDK 为准。
+- **推翻条件**：未来 Xcode/macOS SDK 将 WiFiAware 开放给 macOS 原生进程
+  （重跑 `tools/wa-spike/run.sh` 编译通过即信号），届时按 transport-26-plan §3 原设计恢复。
+
+## ADR-011 全 26+ 部署前提下传输层四项复审决策
+
+- **决策**（2026-08-17 传输方案复审，详见 docs/transport-26-plan.md §4）：
+  ① V2（TLV）真机回归通过后**拆除 9100 手工分帧服务与 iPhone 旧传输实现**——项目
+  "只加不删"兼容文化（protocol.md §6/§7）的首次例外，过渡期双服务并行一个版本周期；
+  ② iPhone 部署目标升 26.0，删除全部 `if #available` 双栈（DockKit 下限 17 仍满足）；
+  ③ Wi-Fi Aware 由"第三通道"升为**首选通道**，Bonjour 降备用，扫码/手工 IP 永久兜底；
+  ④ 采集回传并入主 TLV 连接（type 10/11），撤销独立端口；端口收敛为 9100 单端口。
+- **原因**：新部署前提（目标机全部 iOS 26/macOS 26+）抽掉了原两方案保守设计的地基
+  （现场无 <26 客户端）；用户明确要求传输内容最大化移交 Network.framework / Wi-Fi Aware。
+  WA 首选可同时兑现无路由器直连、免本地网络授权弹窗、datapath 强制加密三项收益。
+- **推翻条件**：现场出现无法升级 26 的设备（恢复旧链路，git 历史可完整回滚）；
+  P0 尖刺证明 Mac 包壳 .app 无法发布 WA 服务（WA 降级，TLV+Bonjour 主路径照常）；
+  采集回传与视频流单连接争用被实测证实（退回独立端口，TLV 栈不变）。
+
 ## ADR-010 默认标记尺寸 24pt → 48pt
 
 - **决策**：`Calibrator` 默认 `markerSize` 与 iPhone 内置默认映射表同步改为 48pt

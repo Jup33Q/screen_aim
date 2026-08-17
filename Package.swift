@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.2
 import PackageDescription
 
 // OpenCV 来自 Homebrew: brew install opencv
@@ -10,7 +10,8 @@ let opencvLib = "/opt/homebrew/opt/opencv/lib"
 let package = Package(
     name: "ScreenAim",
     platforms: [
-        .macOS(.v14)
+        // 传输层迁移（transport-26-plan）：TLV framer / NetworkListener 新 API 需 26+
+        .macOS(.v26)
     ],
     targets: [
         // 纯 Swift 核心：ArUco(DICT_4X4_50) 检测 + 单应映射，iOS/macOS 双端共享
@@ -42,5 +43,10 @@ let package = Package(
             name: "ScreenAim",
             dependencies: ["OpenCVBridge", "ScreenAimCore"]
         )
-    ]
+    ],
+    // NOTE: 旧 FrameServer/CaptureServer 的 NWConnection 回调代码在 Swift 6 语言模式下
+    // 触发并发检查报错；它们是 P3 拆除对象，不值得先做并发化改造。
+    // 过渡期保持 v5 语言模式（tools 6.2 + macOS v26 平台门槛不受影响），
+    // 新增代码（FrameServerV2 等）直接写结构化并发，不受影响。
+    swiftLanguageModes: [.v5]
 )
