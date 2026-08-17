@@ -21,7 +21,6 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_aimphone._tcp.</string>
-		<string>_aimphone2._tcp.</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>需要相机拍摄屏幕上的校准标记</string>

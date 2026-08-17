@@ -4,9 +4,8 @@
 //
 //  关键约束：Network.framework 26+ 结构化并发 API（NetworkListener + 内置 TLV framer），
 //  线上格式 [type: UInt32][length: UInt32][value]（8 字节头，框架拼包/拆包，见 docs/protocol.md §11）。
-//  回调面与旧 FrameServer/CaptureServer 对齐，回调在连接子任务上下文触发（非主线程，
-//  与旧版 conn 队列语义一致），UI 操作需自行派主线程。过渡期与旧 9100 手工分帧服务并行
-//  （ADR-011 ①），旧链路拆除见 transport-26-plan P3。
+//  回调在连接子任务上下文触发（非主线程，与旧版 conn 队列语义一致），UI 操作需自行派主线程。
+//  P3 起为唯一传输服务：复用 9100 端口与 _aimphone._tcp 服务名（ADR-011 ①④，旧链路已拆除）。
 //
 
 import Foundation
@@ -15,10 +14,8 @@ import ScreenAimCore
 
 // NOTE: TLVMessageType 在 ScreenAimCore（双端共享的线上常量，docs/protocol.md §11）
 
-// MARK: - 采集落盘（protocol.md §10/§11）
-/// 采集会话落盘器：与旧 CaptureServer.IngestSession 同源逻辑。
-/// NOTE: 旧 CaptureServer（独立端口 port+1）在过渡期一行不改、并行运行，本类是 V2 单连接
-/// 路径（type 10/11）的对应实现；P3 拆旧链路时旧实现随 CaptureServer 一并删除，届时本类唯一存续。
+// MARK: - 采集落盘（protocol.md §11）
+/// 采集会话落盘器（type 10/11 路径，P3 起唯一存续；与已拆除的旧 CaptureServer 同源逻辑）。
 /// 线程约束：实例由单个连接子任务独占使用，无跨连接共享；onCaptureDone 派主线程。
 final class CaptureIngestor {
     /// 当前采集会话的 Mac 侧元信息（label/标记参数/映射表，写 session.json 用）
@@ -94,7 +91,7 @@ final class CaptureIngestor {
 }
 
 // MARK: - TLV 帧服务
-/// TLV 单连接帧服务（过渡期端口 = servePort+2，Bonjour `_aimphone2._tcp`）。
+/// TLV 单连接帧服务（9100 端口，Bonjour `_aimphone._tcp`）。
 /// 连接建立即下发标定映射表（type 1），随后 `messages` 异步序列按 type 分发：
 /// 0 视频帧 → onFrame；1 控制 JSON → onControl；10/11 采集记录 → CaptureIngestor。
 /// `try await send` 的挂起即背压（框架托管流控），15fps 视频天然节流。
@@ -132,9 +129,8 @@ final class FrameServerV2 {
                           userInfo: [NSLocalizedDescriptionKey: "非法端口 \(port)"])
         }
         let listener = try NetworkListener(
-            // Bonjour 广播 `_aimphone2._tcp`：与旧 `_aimphone._tcp`（9100 手工分帧）区分，
-            // iPhone 端优先发现本服务（过渡期双服务并行，docs/protocol.md §11）
-            for: .bonjour(name: "AimPhone-Mac", type: "_aimphone2._tcp"),
+            // P3 收敛后复用旧服务名与端口（_aimphone._tcp / 9100），线上只有 TLV 一种协议
+            for: .bonjour(name: "AimPhone-Mac", type: "_aimphone._tcp"),
             using: .parameters {
                 // NOTE: noDelay 必须显式开——Nagle 攒批会把 15fps 的小控制消息积成
                 // ~200ms 一坨（真机实测 localAim 批量 46Hz 突发、白点阶梯滞后）；
@@ -161,7 +157,7 @@ final class FrameServerV2 {
                 }
             }
         }
-        print("TLV 帧服务已启动，端口 \(port)（_aimphone2._tcp），等待手机连接…")
+        print("TLV 帧服务已启动，端口 \(port)（_aimphone._tcp），等待手机连接…")
     }
 
     /// 向所有存活连接广播控制消息（Mac → iPhone，type 1，protocol.md §6/§11）

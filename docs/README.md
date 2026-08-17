@@ -14,7 +14,7 @@
 | [development.md](development.md) | 构建、运行、验证、排错清单 | 搭环境 / 出问题时 |
 | [comment-style.md](comment-style.md) | **注释系统规范**：注释分级、模板、标记词、维护约定 | 写/改任何代码前 |
 | [positioning-optimization-plan.md](positioning-optimization-plan.md) | 定位算法优化调研与实施方案（Vision/协议/蓝牙，分 Phase 执行） | 执行定位优化任务前 |
-| [transport-26-plan.md](transport-26-plan.md) | **传输层整体迁移方案（实施中）**：TLV 消息流主路径 + 单连接复用；Wi-Fi Aware 通道已终止（ADR-012，macOS SDK 不可用） | 执行任何传输层改造前 |
+| [transport-26-plan.md](transport-26-plan.md) | 传输层整体迁移方案（**已实施**，2026-08-17）：TLV 消息流单连接复用（9100/`_aimphone._tcp`），旧手工分帧链路已拆除；Wi-Fi Aware 通道终止（ADR-012，macOS SDK 不可用） | 执行任何传输层改造前 |
 | [tlv-migration-plan.md](tlv-migration-plan.md) | TLV 迁移原方案（已并入 transport-26-plan.md，保留为调研背景） | 查 TLV 调研细节 |
 | [wifi-aware-pairing-plan.md](wifi-aware-pairing-plan.md) | Wi-Fi Aware 配对原方案（已并入 transport-26-plan.md，保留为调研背景） | 查 WA 调研细节 |
 

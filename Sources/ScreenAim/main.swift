@@ -38,7 +38,7 @@ func loadBGRA(from path: String) -> (Data, Int, Int)? {
 // MARK: - 屏幕采样器
 /// 帧处理中枢：ScreenCaptureKit 采集 / JPEG 推流两条入口汇入同一检测映射管线。
 ///
-/// 两条入口：`start()` 起 SCStream 本机采屏；`processJPEG(_:)` 由 FrameServer 喂手机帧。
+/// 两条入口：`start()` 起 SCStream 本机采屏；`processJPEG(_:)` 由 FrameServerV2 喂手机帧。
 /// 填好 `screenCornerMap`（≥4 个标记的屏幕坐标，冗余 8 标记见 ADR-007）后，
 /// 每帧把帧中心映射到屏幕坐标并经 `onAim` 输出。
 final class ScreenSampler: NSObject, SCStreamOutput {
@@ -491,265 +491,6 @@ final class ActionButton: NSButton {
     }
 }
 
-// MARK: - TCP 帧服务（手机推流模式）
-/// 手机 JPEG 推流服务：NWListener + Bonjour 自动发现。
-///
-/// 线上协议：`[4 字节大端长度][JPEG 数据]` 循环往复，单帧上限 16 MB（见 docs/protocol.md）。
-/// 读循环：`readHeader`（首次，含 `conn.start`）→ `readBody` → `readBody0`（后续帧头，不重复 start）。
-final class FrameServer {
-    let port: UInt16
-    let onFrame: (Data) -> Void
-    var onConnect: (() -> Void)?      // 手机连上时回调（用于隐藏配对二维码）
-    /// 新连接建立后立刻下发一次的控制消息（标定映射表，protocol.md §6）；nil 则不发
-    var handshakePayload: (() -> Data?)?
-    /// 手机端控制消息回调（长度字最高位置位的帧，protocol.md §7），参数为 JSON 对象
-    var onControl: (([String: Any]) -> Void)?
-    /// 连接断开回调（主动/被动断开都会触发，protocol.md §8 鼠标按键卡死兜底用）
-    var onDisconnect: (() -> Void)?
-    /// 监听器失败回调（主线程）。NOTE: EADDRINUSE 等绑定失败是异步经 stateUpdateHandler
-    /// 上报的，start() 的 throw 捕不到；不处理的话 App 会继续显示配对二维码，
-    /// 但扫码连的是占端口的老进程——屏幕上留下永远配不对的"僵尸二维码"
-    var onListenerFailed: ((Error) -> Void)?
-    private var listener: NWListener?
-    private var activeConns: [NWConnection] = []   // 存活连接（状态广播用，断开时移除）
-
-    init(port: UInt16, onFrame: @escaping (Data) -> Void) {
-        self.port = port
-        self.onFrame = onFrame
-    }
-
-    func start() throws {
-        guard let p = NWEndpoint.Port(rawValue: port) else {
-            throw NSError(domain: "ScreenAim", code: 3,
-                          userInfo: [NSLocalizedDescriptionKey: "非法端口 \(port)"])
-        }
-        let l = try NWListener(using: .tcp, on: p)
-        // Bonjour 广播：手机端无需知道 IP，自动发现自动连接
-        l.service = NWListener.Service(name: "AimPhone-Mac", type: "_aimphone._tcp")
-        l.newConnectionHandler = { [weak self] conn in
-            guard let self else { return }
-            print("手机已连接: \(conn.endpoint)")
-            self.activeConns.append(conn)
-            DispatchQueue.main.async { self.onConnect?() }
-            self.readHeader(conn)   // 内含 conn.start
-            // 控制信道：连接建立即下发标定映射表（[4B 大端长度][JSON]）
-            if let data = self.handshakePayload?() {
-                var len = UInt32(data.count).bigEndian
-                conn.send(content: withUnsafeBytes(of: &len) { Data($0) } + data,
-                          completion: .idempotent)
-                print("标定映射表已下发（\(data.count) 字节）")
-            }
-        }
-        l.stateUpdateHandler = { [weak self] st in
-            print("帧服务状态: \(st)")
-            if case .failed(let e) = st {
-                DispatchQueue.main.async { self?.onListenerFailed?(e) }
-            }
-        }
-        l.start(queue: DispatchQueue(label: "screenaim.server"))
-        listener = l
-        print("TCP 帧服务已启动，端口 \(port)，等待手机连接…")
-    }
-
-    /// 向所有存活连接广播控制消息（Mac → iPhone，[4B 大端长度][JSON]，protocol.md §6）
-    func sendControl(_ obj: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
-        var len = UInt32(data.count).bigEndian
-        let header = withUnsafeBytes(of: &len) { Data($0) }
-        for conn in activeConns {
-            conn.send(content: header + data, completion: .idempotent)
-        }
-    }
-
-    /// 连接终结点统一清理（receive 失败/完成时调用）
-    private func drop(_ conn: NWConnection) {
-        activeConns.removeAll { $0 === conn }
-        conn.cancel()
-        DispatchQueue.main.async { self.onDisconnect?() }
-    }
-
-    private func readHeader(_ conn: NWConnection) {
-        conn.start(queue: DispatchQueue(label: "screenaim.conn"))
-        conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
-            guard let self, let data, data.count == 4, error == nil, !isComplete else {
-                self?.drop(conn); return
-            }
-            let raw = data.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            let isControl = raw & 0x8000_0000 != 0   // 最高位：1=控制帧(JSON) 0=视频帧(JPEG)
-            let len = raw & 0x7FFF_FFFF
-            guard len > 0, len < 16_000_000 else { self.drop(conn); return }
-            self.readBody(conn, length: Int(len), isControl: isControl)
-        }
-    }
-
-    private func readBody(_ conn: NWConnection, length: Int, isControl: Bool) {
-        conn.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, isComplete, error in
-            guard let self else { conn.cancel(); return }
-            if let data, error == nil {
-                if isControl {
-                    if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        self.onControl?(obj)
-                    }
-                } else {
-                    self.onFrame(data)
-                }
-            }
-            if isComplete || error != nil { self.drop(conn); return }
-            self.readBody0(conn)
-        }
-    }
-
-    // 继续读下一帧头（连接已 start，无需重复 start）
-    private func readBody0(_ conn: NWConnection) {
-        conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
-            guard let self, let data, data.count == 4, error == nil, !isComplete else {
-                self?.drop(conn); return
-            }
-            let raw = data.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            let isControl = raw & 0x8000_0000 != 0
-            let len = raw & 0x7FFF_FFFF
-            guard len > 0, len < 16_000_000 else { self.drop(conn); return }
-            self.readBody(conn, length: Int(len), isControl: isControl)
-        }
-    }
-}
-
-// MARK: - 数据采集接收（protocol.md §10）
-/// 采集回传服务：与帧服务同机不同端口（servePort+1）。iPhone 录完一批帧后主动连接，
-/// 流式上传记录：`[4B 大端 jsonLen][json][4B 大端 binLen][bin]`，session/end 记录 binLen=0。
-/// 落盘 scenes/capture_<label>_<时间戳>/（frames/NNNN.png + meta.jsonl + session.json），
-/// 供 `ScreenAim --replay` 离线回放调参。
-final class CaptureServer {
-    /// 当前采集会话的 Mac 侧元信息（label/标记参数/映射表，写 session.json 用）
-    var sessionInfo: (() -> [String: Any])?
-    /// 一次上传完成（或中途断连兜底收尾）回调，参数为落盘目录；主线程派发
-    var onCaptureDone: ((URL) -> Void)?
-    private let port: UInt16
-    private var listener: NWListener?
-
-    init(port: UInt16) { self.port = port }
-
-    func start() throws {
-        guard let p = NWEndpoint.Port(rawValue: port) else {
-            throw NSError(domain: "ScreenAim", code: 4,
-                          userInfo: [NSLocalizedDescriptionKey: "非法端口 \(port)"])
-        }
-        let l = try NWListener(using: .tcp, on: p)
-        l.newConnectionHandler = { [weak self] conn in
-            guard let self else { return }
-            print("采集上传连接: \(conn.endpoint)")
-            conn.start(queue: DispatchQueue(label: "screenaim.ingest"))
-            self.readRecord(conn, IngestSession())
-        }
-        l.start(queue: DispatchQueue(label: "screenaim.ingest.listen"))
-        listener = l
-        print("采集回传服务已启动，端口 \(port)")
-    }
-
-    /// 单个上传连接的进行态
-    private final class IngestSession {
-        var dir: URL?
-        var metaHandle: FileHandle?
-        var frames = 0
-        var bytes: Int64 = 0
-        var phoneSession: [String: Any] = [:]
-        var finished = false
-    }
-
-    /// 读满 n 字节；失败/断流回调 nil
-    private func readExact(_ conn: NWConnection, _ n: Int,
-                           completion: @escaping (Data?) -> Void) {
-        if n == 0 { completion(Data()); return }
-        conn.receive(minimumIncompleteLength: n, maximumLength: n) { data, _, _, error in
-            guard let data, data.count == n, error == nil else { completion(nil); return }
-            completion(data)
-        }
-    }
-
-    private func readRecord(_ conn: NWConnection, _ s: IngestSession) {
-        readExact(conn, 4) { [weak self] hdr in
-            guard let self, let hdr else { self?.finish(s); conn.cancel(); return }
-            let jsonLen = Int(hdr.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            guard jsonLen > 0, jsonLen < 1_000_000 else { self.finish(s); conn.cancel(); return }
-            self.readExact(conn, jsonLen) { json in
-                guard let json,
-                      let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any]
-                else { self.finish(s); conn.cancel(); return }
-                self.readExact(conn, 4) { blHdr in
-                    guard let blHdr else { self.finish(s); conn.cancel(); return }
-                    let binLen = Int(blHdr.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-                    guard binLen < 16_000_000 else { self.finish(s); conn.cancel(); return }
-                    self.readExact(conn, binLen) { bin in
-                        guard let bin else { self.finish(s); conn.cancel(); return }
-                        self.processRecord(obj, bin: bin, session: s)
-                        if (obj["kind"] as? String) == "end" {
-                            self.finish(s)
-                            conn.cancel()
-                        } else {
-                            self.readRecord(conn, s)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func processRecord(_ obj: [String: Any], bin: Data, session s: IngestSession) {
-        switch obj["kind"] as? String {
-        case "session":
-            s.phoneSession = obj
-            let info = sessionInfo?() ?? [:]
-            let rawLabel = (info["label"] as? String ?? "")
-                .filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
-            let label = rawLabel.isEmpty ? "session" : rawLabel
-            let stamp = ISO8601DateFormatter().string(from: Date())
-                .replacingOccurrences(of: ":", with: "-")
-            let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("scenes/capture_\(label)_\(stamp)", isDirectory: true)
-            try? FileManager.default.createDirectory(
-                at: dir.appendingPathComponent("frames", isDirectory: true),
-                withIntermediateDirectories: true)
-            let metaURL = dir.appendingPathComponent("meta.jsonl")
-            FileManager.default.createFile(atPath: metaURL.path, contents: nil)
-            s.metaHandle = FileHandle(forWritingAtPath: metaURL.path)
-            s.dir = dir
-        case "frame":
-            guard let dir = s.dir, let seq = obj["seq"] as? Int else { return }
-            try? bin.write(to: dir.appendingPathComponent(
-                String(format: "frames/%04d.png", seq)))
-            s.metaHandle?.write(jsonLine(obj))
-            s.frames += 1
-            s.bytes += Int64(bin.count)
-        default:
-            break
-        }
-    }
-
-    private func jsonLine(_ obj: [String: Any]) -> Data {
-        guard let d = try? JSONSerialization.data(withJSONObject: obj) else { return Data() }
-        return d + Data([0x0A])
-    }
-
-    /// 收尾：合并双端元信息写 session.json，打印摘要，通知 UI
-    private func finish(_ s: IngestSession) {
-        guard !s.finished, s.dir != nil else { return }
-        s.finished = true
-        s.metaHandle?.closeFile()
-        guard let dir = s.dir else { return }
-        var session = sessionInfo?() ?? [:]
-        session["device"] = s.phoneSession["device"] ?? "unknown"
-        session["os"] = s.phoneSession["os"] ?? "unknown"
-        session["frames"] = s.frames
-        session["bytes"] = s.bytes
-        if let d = try? JSONSerialization.data(withJSONObject: session, options: [.prettyPrinted, .sortedKeys]) {
-            try? d.write(to: dir.appendingPathComponent("session.json"))
-        }
-        print(String(format: "采集落盘: %@（%d 帧，%.1fMB）",
-                     dir.path, s.frames, Double(s.bytes) / 1e6))
-        DispatchQueue.main.async { self.onCaptureDone?(dir) }
-    }
-}
-
 
 // MARK: - 透明悬浮标定层
 /// 全屏透明、点击穿透的悬浮窗口：四角 + 四边中点共 8 个悬浮 ArUco 标记（ADR-007）
@@ -757,7 +498,7 @@ final class CaptureServer {
 ///
 /// - 每个标记自带白色圆角底卡，保证任意桌面背景下的 ArUco 静区（WARNING: 无静区无法检测）
 /// - 标记中心坐标自动写入 `ScreenSampler.screenCornerMap`，无需手工标定
-/// - 配对二维码内容 `{"host":ip,"port":port,"port2":port+2}`（port2 = TLV 端口，过渡期），IP 每 5 秒轮询、变化即重生成
+/// - 配对二维码内容 `{"host":ip,"port":port}`（port 即 TLV 端口，P3 收敛后），IP 每 5 秒轮询、变化即重生成
 /// - `run()` 阻塞进 NSApp 主循环，ESC 退出
 final class Calibrator: NSObject {
     var markerSize: CGFloat   // 标记边长（点），滑杆实时调整
@@ -775,7 +516,7 @@ final class Calibrator: NSObject {
     /// 立即按当前 IP 重新生成配对二维码（IP 看守计时器与手机断开通知共用）
     var refreshQRNow: (() -> Void)?
     var qrButton: ActionButton?  // Mac 端配对码开关按钮（悬浮 NSPanel 上）
-    /// 数据采集状态（protocol.md §10）：录制中按钮变红，CaptureServer 收完自动复位
+    /// 数据采集状态（protocol.md §10）：录制中按钮变红，采集上传收完自动复位
     var capturing = false
     var captureButton: ActionButton?
     var captureLabel = ""
@@ -904,7 +645,7 @@ final class Calibrator: NSObject {
     }
 
     /// 连接断开兜底：对仍处按下状态的键补发 up，防止真实鼠标键卡死
-    /// （FrameServer.onDisconnect / 收到 disconnect 消息时调用）
+    /// （FrameServerV2.onDisconnect / 收到 disconnect 消息时调用）
     func releaseStuckMouseButtons() {
         csvLock.lock()
         let stuck = pressedMouseButtons
@@ -1078,8 +819,8 @@ final class Calibrator: NSObject {
         window = win
         // 配对二维码（仅手机推流模式）：圆角方形卡，屏幕正中央，手机扫码自动获取 IP/端口
         if let port = servePort, let ip = primaryIPv4() {
-            // port2 = TLV 服务端口（过渡期并存，protocol.md §11）；旧版手机忽略未知字段
-            let payload = "{\"host\":\"\(ip)\",\"port\":\(port),\"port2\":\(port + 2)}"
+            // port 即 TLV 服务端口（P3 收敛后单端口单服务，protocol.md §11）
+            let payload = "{\"host\":\"\(ip)\",\"port\":\(port)}"
             let qrSide: CGFloat = 190
             let cardSide: CGFloat = 250
             let card = NSView(frame: NSRect(x: (W - cardSide) / 2, y: (H - cardSide) / 2,
@@ -1105,7 +846,7 @@ final class Calibrator: NSObject {
             // IP 变化看守：每 5 秒检查一次，IP 变了自动重新生成二维码
             refreshQRNow = { [weak self] in
                 guard let self, let ip = primaryIPv4() else { return }
-                let newPayload = "{\"host\":\"\(ip)\",\"port\":\(port),\"port2\":\(port + 2)}"
+                let newPayload = "{\"host\":\"\(ip)\",\"port\":\(port)}"
                 guard newPayload != self.currentPayload else { return }
                 self.currentPayload = newPayload
                 self.rebuildQR(payload: newPayload, side: qrSide)
@@ -1171,9 +912,7 @@ final class Calibrator: NSObject {
                 // 此前 onFrame 在 conn 队列同步执行，识别一帧期间不收下一帧，
                 // TCP 缓冲积压 → 延迟累积、有效帧率远低于手机端。改为 busy 标志 +
                 // 独立队列：处理中时新到的视频帧直接丢弃（视频帧可丢；控制帧在
-                // FrameServer 内联分发，不受此影响）。
-                // NOTE: 过渡期新旧两个服务（9100 手工分帧 / port+2 TLV）共用同一套丢帧
-                // 守卫与处理队列——同一时刻只有一条链路在推流，竞争退化为旧帧丢弃
+                // 服务内联分发，不受此影响）
                 let frameBusy = NSLock()
                 var frameInFlight = false
                 let frameQueue = DispatchQueue(label: "screenaim.frames")
@@ -1187,15 +926,8 @@ final class Calibrator: NSObject {
                         frameBusy.lock(); frameInFlight = false; frameBusy.unlock()
                     }
                 }
-                let server = FrameServer(port: port, onFrame: processFrame)
-                // TLV 单连接服务（protocol.md §11，过渡期与旧服务并行，ADR-011 ①）：
-                // 回调面与旧 FrameServer/CaptureServer 对齐，下方 Calibrator 接线两份共享
-                let serverV2 = FrameServerV2(port: port + 2, onFrame: processFrame)
-                // 控制消息广播：过渡期新旧链路并存，calib/pairingQR/capture* 同步发两边
-                let broadcastControl: ([String: Any]) -> Void = { obj in
-                    server.sendControl(obj)
-                    serverV2.sendControl(obj)
-                }
+                // TLV 单连接服务（protocol.md §11；P3 收敛后唯一传输服务，9100/_aimphone._tcp）
+                let server = FrameServerV2(port: port, onFrame: processFrame)
                 // 瞄准点绑定光标（--aim-cursor）：手机帧识别出的屏幕点直接 warp 鼠标，
                 // 与 §8 触控点击配合 = 手机瞄哪里点哪里。瞄准点是主屏点坐标（左上角原点），
                 // 与 Quartz 全局坐标系一致，直接传入；钳制在屏内防止单应外推甩飞光标
@@ -1213,32 +945,23 @@ final class Calibrator: NSObject {
                 server.handshakePayload = { [weak self] in
                     self?.calibPayload()
                 }
-                serverV2.handshakePayload = server.handshakePayload
                 // 配对二维码可见性：任何变化都同步推送给所有已连手机（按钮高亮跟随真实状态）
                 let setQRVisible: (Bool) -> Void = { [weak self] visible in
                     guard let self, let card = self.qrCard, card.isHidden == visible else { return }
                     card.isHidden = !visible
                     // 图标态：白 = 二维码可见，灰 = 已隐藏
                     self.qrButton?.contentTintColor = visible ? .white : NSColor.white.withAlphaComponent(0.4)
-                    broadcastControl(["type": "pairingQR", "visible": visible])
+                    server.sendControl(["type": "pairingQR", "visible": visible])
                     print(visible ? "配对二维码已显示" : "配对二维码已隐藏")
                 }
                 server.onConnect = {
                     setQRVisible(false)   // 配对成功，隐藏二维码并广播状态
-                }
-                serverV2.onConnect = { [weak self] in
-                    setQRVisible(false)   // 配对成功，隐藏二维码并广播状态
-                    // 悬浮层 debug 胶囊显示链路来源（TLV/旧 TCP 由后续 localAim 文案自然覆盖）
-                    DispatchQueue.main.async {
-                        self?.debugLabel?.stringValue = "iPhone 瞄准: 已连接（TLV 通道）"
-                    }
                 }
                 // 连接断开（主动/被动统一，§8）：按住中的鼠标键补发 up，防键卡死
                 server.onDisconnect = { [weak self] in
                     self?.releaseStuckMouseButtons()
                     self?.setMarkerActivation([])   // 帧流中断，绿边全部失效
                 }
-                serverV2.onDisconnect = server.onDisconnect
 
                 // Mac 端配对码开关 + 退出应用按钮 + 采集按钮 + 定位码大小/不透明度滑杆 + 隐藏 UI 按钮：
                 // 主覆盖层点击穿透，所以单独用一个可点击的悬浮 NSPanel（屏幕顶部居中）
@@ -1306,7 +1029,7 @@ final class Calibrator: NSObject {
                     NSApp.terminate(nil)
                 }
                 // 数据采集按钮（protocol.md §10）：点击下发 captureStart（10s@5fps），
-                // 录制中变红，再点提前停止；CaptureServer 收完上传后自动复位颜色
+                // 录制中变红，再点提前停止；采集上传收完后自动复位颜色
                 let recBg = makeBtnBg(x: qrBtnW + closeBtnW + btnGap * 2, w: recBtnW)
                 let recBtn = makeSymbolButton(symbol: "record.circle", tint: .white,
                                               tooltip: "采集 10 秒识别数据（手机回传，落盘 scenes/）",
@@ -1314,13 +1037,13 @@ final class Calibrator: NSObject {
                 recBtn.onClick = { [weak self] in
                     guard let self else { return }
                     if self.capturing {
-                        broadcastControl(["type": "captureStop"])
+                        server.sendControl(["type": "captureStop"])
                     } else {
                         // label 只带 Mac 侧已知的标记参数；距离/运动语义由操作者事后改目录名补充
                         self.captureLabel = String(format: "m%d_i%d",
                                                    Int(self.markerSize), Int(self.inset))
-                        broadcastControl(["type": "captureStart", "seconds": 10, "fps": 5,
-                                          "label": self.captureLabel])
+                        server.sendControl(["type": "captureStart", "seconds": 10, "fps": 5,
+                                            "label": self.captureLabel])
                     }
                     self.capturing.toggle()
                     recBtn.contentTintColor = self.capturing ? .systemRed : .white
@@ -1371,7 +1094,7 @@ final class Calibrator: NSObject {
                         self.centers.enumerated().map { (Int32($0.offset), $0.element) })
                     if let data = self.calibPayload(),
                        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        broadcastControl(obj)   // 广播新标定表给所有已连手机（protocol.md §7/§11）
+                        server.sendControl(obj)   // 广播新标定表给所有已连手机（protocol.md §6/§11）
                     }
                     sizeBadge.value = tick
                     print("定位码大小: \(tick)pt（滑杆调整，新标定表已广播）")
@@ -1583,8 +1306,7 @@ final class Calibrator: NSObject {
                         break
                     }
                 }
-                server.onControl = { msg in handlePhoneControl(msg, "tcp") }
-                serverV2.onControl = { msg in handlePhoneControl(msg, "tlv") }
+                server.onControl = { msg in handlePhoneControl(msg, "tlv") }
                 // 监听失败（典型：端口被旧实例占用）→ 弹窗说明并退出，
                 // 绝不留着没有服务能力的二维码继续显示（僵尸二维码）
                 server.onListenerFailed = { err in
@@ -1596,22 +1318,10 @@ final class Calibrator: NSObject {
                     alert.runModal()
                     NSApp.terminate(nil)
                 }
-                serverV2.onListenerFailed = { err in
-                    let alert = NSAlert()
-                    alert.messageText = "TLV 帧服务启动失败（端口 \(port + 2)）"
-                    alert.informativeText = "\(err.localizedDescription)\n\n通常是已有另一个 ScreenAim 实例正在运行。请先退出旧实例（或在其窗口按 ESC），再启动本实例。"
-                    alert.alertStyle = .critical
-                    alert.addButton(withTitle: "退出")
-                    alert.runModal()
-                    NSApp.terminate(nil)
-                }
                 try server.start()
-                try serverV2.start()
                 objc_setAssociatedObject(win, "server", server, .OBJC_ASSOCIATION_RETAIN)
-                objc_setAssociatedObject(win, "serverV2", serverV2, .OBJC_ASSOCIATION_RETAIN)
-                // 采集回传服务（protocol.md §10）：与帧服务同机，端口 +1
-                let captureServer = CaptureServer(port: port + 1)
-                captureServer.sessionInfo = { [weak self, sampler] in
+                // 采集回传并入主 TLV 连接（type 10/11，protocol.md §11；旧独立端口服务已随 P3 拆除）
+                server.sessionInfo = { [weak self, sampler] in
                     guard let self else { return [:] }
                     var map: [String: [Double]] = [:]
                     for (k, v) in sampler.screenCornerMap {
@@ -1623,16 +1333,10 @@ final class Calibrator: NSObject {
                             "screenW": Double(self.screenW), "screenH": Double(self.screenH),
                             "screenCornerMap": map]
                 }
-                captureServer.onCaptureDone = { [weak self] _ in
+                server.onCaptureDone = { [weak self] _ in
                     self?.capturing = false
                     self?.captureButton?.contentTintColor = .white
                 }
-                // TLV 路径采集回传并入主连接（type 10/11，protocol.md §11），回调面同源复用
-                serverV2.sessionInfo = captureServer.sessionInfo
-                serverV2.onCaptureDone = captureServer.onCaptureDone
-                try captureServer.start()
-                objc_setAssociatedObject(win, "captureServer", captureServer,
-                                         .OBJC_ASSOCIATION_RETAIN)
             } catch {
                 // 同步 throw（如非法端口）：同样不允许带病运行
                 fputs("帧服务启动失败: \(error.localizedDescription)\n", stderr)

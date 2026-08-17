@@ -12,13 +12,13 @@ iPhone 相机对着 Mac 屏幕 → Mac 识别屏幕四角的 ArUco 标记 → �
 │ AVCaptureSession 720p ──► CameraStreamer          │
 │   手动曝光 1/120s（抑制屏幕条纹）                    │
 │   Vision 二维码识别（未连接时）                      │
-│   JPEG 编码 0.6 @ 15fps ──► TCP ──┐               │
+│   JPEG 编码 0.6 @ 15fps ──► TLVTransport ──┐        │
 │ GimbalManager（DockKit 云台按键/状态）              │
 └────────────────────────────────────┼──────────────┘
-                                     │ TCP [4B 大端长度][JPEG]
-                                     │ Bonjour: _aimphone._tcp
+                                     │ TLV 消息流（protocol.md §11，type 0/1/10/11）
+                                     │ Bonjour: _aimphone._tcp（9100 单端口）
 ┌────────────── Mac (ScreenAim) ─────▼──────────────┐
-│ FrameServer ──► ScreenSampler.processJPEG         │
+│ FrameServerV2 ──► ScreenSampler.processJPEG       │
 │ （或 ScreenCaptureKit 本机采屏 ──► processBGRA）    │
 │        │                                          │
 │        ▼                                          │
@@ -38,9 +38,9 @@ iPhone 相机对着 Mac 屏幕 → Mac 识别屏幕四角的 ArUco 标记 → �
 | OpenCVBridge | `Sources/OpenCVBridge/` | ObjC++ 封装 `cv::aruco` 检测、标记生成、单应映射（`getPerspectiveTransform` / `findHomography` RANSAC） | 只依赖 OpenCV |
 | ScreenAimCore | `Sources/ScreenAimCore/` | 纯 Swift 定位核（双端共享）：ArUco 检测（含亚像素角点精化）、单应（四点 DLT / RANSAC+最小二乘）、One Euro 输出滤波 | 只依赖 Accelerate |
 | ScreenSampler | `Sources/ScreenAim/main.swift` | 帧入口（SCStream / JPEG）→ 检测 → RANSAC 映射 → One Euro 滤波 → `onAim` 回调 | → OpenCVBridge / ScreenAimCore |
-| FrameServer | 同上 | TCP 帧服务 + Bonjour 广播 | → ScreenSampler.processJPEG |
-| Calibrator | 同上 | 透明悬浮标定层：8 标记（4 角 + 4 边中点，ADR-007）、配对二维码、自动填映射表 | → ScreenSampler / FrameServer |
-| CameraStreamer | `ios/AimPhone/CameraStreamer.swift` | 相机采集、JPEG 推流、连接管理、扫码配对 | 无（叶子模块） |
+| FrameServerV2 | `Sources/ScreenAim/FrameServerV2.swift` | TLV 单连接帧服务（视频/控制/采集回传，§11）+ Bonjour 广播；`CaptureIngestor` 采集落盘 | → ScreenSampler.processJPEG |
+| Calibrator | `Sources/ScreenAim/main.swift` | 透明悬浮标定层：8 标记（4 角 + 4 边中点，ADR-007）、配对二维码、自动填映射表 | → ScreenSampler / FrameServerV2 |
+| CameraStreamer | `ios/AimPhone/CameraStreamer.swift` | 相机采集、JPEG 推流、连接管理、扫码配对（传输核心 `TLVTransport`，§11） | 无（叶子模块） |
 | GimbalManager | `ios/AimPhone/GimbalManager.swift` | DockKit 云台状态/按键事件 → 注入的动作闭包 | 无（叶子模块） |
 | ContentView | `ios/AimPhone/ContentView.swift` | 全部 UI + 手势状态机 + 云台按键动作注入 | → 上面两者 |
 

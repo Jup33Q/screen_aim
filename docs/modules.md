@@ -33,8 +33,8 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `ArucoDictionary` | id0–7 位图表 + 4 旋转查表（精确 → 汉明距 1 纠错） |
 | `TLVMessageType` | TLV 消息类型号（protocol.md §11）：video=0 / control=1 / captureMeta=10 / captureFrame=11；线上常量双端共享 |
 
-| `FrameServerV2` | TLV 单连接帧服务（protocol.md §11，过渡期端口 servePort+2，Bonjour `_aimphone2._tcp`）：NetworkListener + 内置 TLV framer，`messages` 按 type 分发 0/1/10/11；回调面与旧 `FrameServer`/`CaptureServer` 对齐（onFrame/onConnect/onControl/onDisconnect/handshakePayload/onListenerFailed/sessionInfo/onCaptureDone），Calibrator 接线无差别；**`TCP().noDelay(true)` 必开**（§11） |
-| `CaptureIngestor` | 采集落盘器（type 10/11 路径）：与旧 `CaptureServer.IngestSession` 同源逻辑，落盘 `scenes/capture_*/` 三件套；P3 拆旧链路后唯一存续 |
+| `FrameServerV2` | TLV 单连接帧服务（protocol.md §11，9100 端口，Bonjour `_aimphone._tcp`，P3 起唯一传输服务）：NetworkListener + 内置 TLV framer，`messages` 按 type 分发 0/1/10/11；`onFrame` 交 JPEG，`onConnect` 通知已配对，`onControl` 分发控制消息（§6/§7/§8），`onDisconnect` 断连回调（鼠标键卡死兜底，ADR-008），`handshakePayload` 连接即下发标定表，采集回调 `sessionInfo`/`onCaptureDone`；**`TCP().noDelay(true)` 必开**（§11） |
+| `CaptureIngestor` | 采集落盘器（type 10/11）：落盘 `scenes/capture_*/` 三件套（frames/NNNN.png + meta.jsonl + session.json 双端合并），中途断连按已收帧数兜底收尾 |
 
 ### `Sources/ScreenAim/main.swift`
 
@@ -43,8 +43,6 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `ScreenSampler` | 帧处理中枢：`start()` 起 SCStream；`processJPEG` / `processBGRA` 两条入口汇到同一检测映射管线（RANSAC 映射 + One Euro 输出滤波）；`screenCornerMap` 填 ≥4 个标记的屏幕坐标后输出 `onAim`；`onMarkersDetected` 每帧回调检出标记 ID（标定层绿边的数据源）；FPS 日志带 `det=xxms` 检测耗时 |
 | `primaryIPv4()` | 本机主网卡 IPv4（优先 en0），配对二维码用 |
 | `makeQRImage` / `makeStyledQRImage` | 二维码 NSImage 生成（普通 / 小程序码圆点风格） |
-| `FrameServer` | TCP 帧服务 + Bonjour 发布；`onFrame` 交 JPEG，`onConnect` 通知已配对，`onControl` 内联分发控制消息（protocol.md §7/§8），`onDisconnect` 断连回调（鼠标键卡死兜底用，ADR-008） |
-| `CaptureServer` | 采集回传服务（protocol.md §10，servePort+1）：接收 iPhone 无损 PNG + 元数据，落盘 `scenes/capture_*/` |
 | `Calibrator` | 透明悬浮标定层：8 标记（4 角 + 4 边中点，自带白色底卡保证静区）、中央配对二维码、IP 变化看守、ESC 退出；`run()` 阻塞进主循环；`setMarkerActivation` 标记激活绿边、`markerAlpha` 白卡不透明度滑杆（0.4–1.0）、`aimDot` localAim 白点覆盖层、`aimCursor`（`--aim-cursor`）瞄准点绑光标；鼠标模拟器 `handleMouseButton` / `releaseStuckMouseButtons`（ADR-008）；localAim 写 `scenes/localaim_*.csv`（列含 detect_ms/src），鼠标事件写 `scenes/mouse_*.csv`（`logMouseEvent`，列 timestamp,event,button,delta） |
 | `postMouseDown/Up/Click/Scroll` | 鼠标模拟器事件注入（protocol.md §8）：当前光标位置 CGEvent 按下/抬起/点击/滚轮；需辅助功能授权，否则事件被系统静默丢弃 |
 
@@ -63,8 +61,8 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 | `CameraAvailability` | unknown / available / unauthorized / failed(String)，驱动兜底 UI |
 | `setBrightness(_:)` | v∈0...1 → ISO [minISO, minISO×10]，手动曝光 1/120s 不变 |
 | `setZoomFactor` / `flipCamera` / `toggleStreamPaused` | 云台按键映射的相机操作 |
-| `connect(host:port:)` / `connectTLV(host:port:)` / `connectEndpoint(_:label:)` / `disconnect()` | 连接管理（5s 看门狗 + 6 次重试）；`connectTLV` 走新协议（§11，二维码 port2 / `_aimphone2._tcp` 走入），手动输入/无 port2 二维码走旧协议 |
-| `startBrowsing()` | Bonjour 自动发现：优先 `_aimphone2._tcp`（TLV），3s 未发现回退 `_aimphone._tcp`（旧版 Mac 兼容） |
+| `connect(host:port:)` / `connectEndpoint(_:label:)` / `disconnect()` | 连接管理（TLV 单一协议，§11；看门狗 5s×6 在 TLVTransport 内）；扫码兼容读过渡期二维码的 port2 字段 |
+| `startBrowsing()` | Bonjour 自动发现 `_aimphone._tcp`（主方案） |
 | `scanQRCode()` / `cancelScan()` | 主动扫码（5 秒窗口逐帧搜索）；未连接时也有 0.3s 间隔的被动扫码 |
 | `onScanned` | 扫码成功回调（UI 回填地址） |
 | `localizeFrame(_:timestamp:)` | 逐帧本机识别 + localAim 每帧上报（不抽稀 ≈15Hz，ADR-009）+ 采集抽帧入口 |
@@ -72,7 +70,7 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 
 ### `TLVTransport.swift`
 
-TLV 单连接传输（protocol.md §11，CameraStreamer 的新协议收发核心）：NetworkConnection +
+TLV 单连接传输（protocol.md §11，CameraStreamer 的传输核心，P3 起唯一传输路径）：NetworkConnection +
 内置 TLV framer；看门狗重试（5s×6，establishmentReport 与超时竞争）；`send(jpeg:)` type 0 /
 `sendControl` type 1（sendIdempotent）/ `uploadCapture` type 10/11（await send 串行背压，
 并入主连接无第二端口）；`disconnectGracefully` 补发 mouseUp all + disconnect 并以
@@ -80,9 +78,9 @@ lastMessage 收尾（ADR-008 语义不变）。事件/控制回调全部主线�
 
 ### `CaptureRecorder.swift`
 
-真机数据采集（protocol.md §10/§11）：Mac 控制帧触发，无损 PNG + meta.jsonl 录到临时目录；
-TLV 链路经主连接 type 10/11 上传（`TLVTransport.uploadCapture`），旧链路经 port+1 第二条
-TCP 上传（P3 拆除）。全部在 `aimphone.capture` 队列，UI 零改动（进度复用 `statusText`）。
+真机数据采集（protocol.md §10/§11）：Mac 控制帧触发，无损 PNG + meta.jsonl 录到临时目录，
+录完经主 TLV 连接 type 10/11 上传（`TLVTransport.uploadCapture`）。全部在
+`aimphone.capture` 队列，UI 零改动（进度复用 `statusText`）。
 
 ### `GimbalManager.swift`
 

@@ -20,8 +20,6 @@ targets:
         NSLocalNetworkUsageDescription: "需要自动发现并连接局域网内的 Mac 传输画面"
         NSBonjourServices:
           - "_aimphone._tcp."
-          # TLV 服务（新协议主路径，protocol.md §11；过渡期与旧服务并行）
-          - "_aimphone2._tcp."
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

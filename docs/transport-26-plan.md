@@ -1,9 +1,10 @@
 # 传输层整体迁移方案（iOS 26 / macOS 26+ 专属修订版）
 
-> 状态：实施中（2026-08-17 激活）。P0 尖刺结论：①②通过；③**不过**——Wi-Fi Aware
-> 在 macOS 不可用（Xcode 26.6 SDK 全符号 `@available(macOS, unavailable)`，系统框架为空壳），
-> WA 通道终止，降级为 **TLV + Bonjour 主路径**（详见 ADR-012）。P2 阶段整体搁置，
-> 其余按本文执行，本文所有 WA 相关内容仅作恢复时的设计底稿。
+> 状态：**已实施**（2026-08-17 激活，同日 P0–P3 完成）。P0 尖刺结论：①②通过；③不过——
+> Wi-Fi Aware 在 macOS 不可用（Xcode 26.6 SDK 全符号 `@available(macOS, unavailable)`，
+> 系统框架为空壳），WA 通道终止，按预案降级为 TLV + Bonjour 主路径（ADR-012）。
+> P1 过渡期双服务并行 + 真机验收（含 noDelay 修复）通过；P3 旧链路拆除、收敛 9100 单端口，
+> 真机回归全绿。本文保留为方案档案；WA 相关内容（§2/§3 等）仅作生态成熟后恢复的设计底稿。
 > 本文是 [tlv-migration-plan.md](tlv-migration-plan.md) 与
 > [wifi-aware-pairing-plan.md](wifi-aware-pairing-plan.md) 在**新部署前提**下的复审合并版，
 > 两原文档保留为调研背景，实施以本文为准。
