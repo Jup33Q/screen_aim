@@ -247,6 +247,10 @@ final class CameraStreamer: NSObject, ObservableObject {
             isConnected = true
             connectionError = false
             streamPaused = false   // 新连接复位推流暂停，避免"连上但没画面"
+            // 扫码搜索途中连上（被动 0.3s 轮询命中二维码）：复位扫描态，
+            // 否则遮罩不消失且按钮停在"取消"语义（scanDeadline 还在跑）
+            scanning = false
+            scanDeadline = 0
             statusText = "已连接 \(label)"
             // 连上后停止 Bonjour 浏览
             browser?.cancel()

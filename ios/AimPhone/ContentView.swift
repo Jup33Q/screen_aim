@@ -393,47 +393,35 @@ struct ContentView: View {
                                             removal: .opacity))
             }
 
-            if !streamer.isConnected {
-                // 分隔线 + 扫码/取消共用按钮（扫码中变为橙色 ×）
-                Capsule()
-                    .fill(.white.opacity(0.3))
-                    .frame(width: 1.5, height: 24)
-                Button {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    if streamer.scanning {
-                        streamer.cancelScan()
-                    } else {
-                        streamer.scanQRCode()
-                    }
-                } label: {
-                    Image(systemName: streamer.scanning ? "xmark" : "qrcode.viewfinder")
-                        .font(.system(size: 20, weight: .semibold))
-                        // 状态色只染图标前景，按钮底为透明玻璃
-                        .foregroundStyle(streamer.scanning ? .orange : Color.accentColor)
-                        .frame(width: 44, height: 44)   // ≥44pt 点击目标
-                        .glassCircleNeutral()
-                        .contentShape(Circle())
-                }
-                .accessibilityLabel(streamer.scanning ? "取消扫码" : "扫码配对")
-            }
-
-            // 分隔线 + Mac 配对二维码开关（同一按钮切换显示/隐藏，高亮跟随 Mac 推送的真实状态）
+            // 分隔线 + 配对按钮（扫码与 Mac 二维码开关合并：两者天然互斥——
+            // 未连接时只能扫码配对，已连接时扫码无意义、只剩开关 Mac 配对码；
+            // 扫码进行中变橙色 × 取消）
             Capsule()
                 .fill(.white.opacity(0.3))
                 .frame(width: 1.5, height: 24)
             Button {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                streamer.toggleMacPairingQR()
+                if streamer.scanning {
+                    streamer.cancelScan()
+                } else if !streamer.isConnected {
+                    streamer.scanQRCode()
+                } else {
+                    streamer.toggleMacPairingQR()
+                }
             } label: {
-                Image(systemName: "qrcode")
+                Image(systemName: streamer.scanning ? "xmark"
+                        : streamer.isConnected ? "qrcode" : "qrcode.viewfinder")
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(!streamer.isConnected ? Color.secondary
-                        : streamer.pairingQRVisibleOnMac ? .yellow : Color.accentColor)
+                    // 状态色只染图标前景，按钮底为透明玻璃
+                    .foregroundStyle(streamer.scanning ? .orange
+                        : streamer.isConnected && streamer.pairingQRVisibleOnMac ? .yellow
+                        : Color.accentColor)
                     .frame(width: 44, height: 44)   // ≥44pt 点击目标
                     .glassCircleNeutral()
                     .contentShape(Circle())
             }
-            .accessibilityLabel("切换 Mac 配对二维码显示")
+            .accessibilityLabel(streamer.scanning ? "取消扫码"
+                : streamer.isConnected ? "切换 Mac 配对二维码显示" : "扫码配对")
 
             // 分隔线 + 退出应用（红色 power，二次确认防误触）
             Capsule()
