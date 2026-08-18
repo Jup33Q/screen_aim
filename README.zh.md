@@ -1,5 +1,10 @@
 # ScreenAim — 屏幕采样 + ArUco 标记检测（macOS 端）
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Swift](https://img.shields.io/badge/Swift-6.x-orange.svg?logo=swift)](https://swift.org)
+[![Platform](https://img.shields.io/badge/platform-macOS%2026%2B%20%7C%20iOS%2026%2B-lightgrey.svg?logo=apple)](https://www.apple.com/macos/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-5.0-blue.svg)](https://opencv.org)
+
 手机瞄准投屏方案（路线 B / Mac 端识别）的最小可行实例：
 **ScreenCaptureKit 采集屏幕帧 → OpenCV ArUco 标记检测 → 单应矩阵（homography）映射到屏幕坐标**。
 
