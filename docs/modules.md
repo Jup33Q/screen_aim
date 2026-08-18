@@ -67,7 +67,8 @@ WP-L1 显示外推（匀速 +33/+66ms 误差 / 静止漂移 / 120ms 封顶），
 |---|---|
 | `CameraAvailability` | unknown / available / unauthorized / failed(String)，驱动兜底 UI |
 | `setBrightness(_:)` | v∈0...1 → ISO [minISO, minISO×10]，手动曝光 1/120s 不变 |
-| `setZoomFactor` / `flipCamera` / `toggleStreamPaused` | 云台按键映射的相机操作 |
+| `setZoomFactor(_:)` / `adjustZoom(delta:)` / `zoomFactor` | 数码变焦（ADR-019）：绝对倍率（二指手势）与乘法增量（轮盘，一格 ≈5%）双入口，共用 videoQueue 执行核 `applyZoom`，钳 [设备下限, min(3×, 设备上限)]（≈3.1× 内不丢有效分辨率）；`zoomFactor` 主线程只读供 UI 倍率指示与手势基线；切前后摄回 1× |
+| `flipCamera` / `toggleStreamPaused` | 云台按键映射的相机操作 |
 | `connect(host:port:)` / `connectEndpoint(_:label:)` / `disconnect()` | 连接管理（TLV 单一协议，§11；看门狗 5s×6 在 TLVTransport 内）；扫码兼容读过渡期二维码的 port2 字段 |
 | `startBrowsing()` | Bonjour 自动发现 `_aimphone._tcp`（主方案） |
 | `scanQRCode()` / `cancelScan()` | 主动扫码（5 秒窗口逐帧搜索）；未连接时也有 0.3s 间隔的被动扫码 |
@@ -108,7 +109,7 @@ DockKit 云台适配层（`#if canImport(DockKit)` 守卫，模拟器全降级�
 |---|---|
 | `onShutter` | 快门键 → 扫码配对 / 取消扫码（需按住扳机） |
 | `onFlip` | 翻转键 → 连接 Mac / 断开（需按住扳机） |
-| `onZoomDelta` | 轮盘增量 → 亮度调节（需按住扳机） |
+| `onZoomDelta` | 轮盘增量 → 数码变焦（需按住扳机；ADR-019，原为亮度） |
 
 调试面板：`lastEvent` / `eventHistory`（最多 20 条）上屏显示，稳定后可移除。
 

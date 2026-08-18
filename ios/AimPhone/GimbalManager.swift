@@ -28,7 +28,7 @@ private let gimbalLog = Logger(subsystem: "com.screenaim.AimPhone", category: "G
 /// - 扳机 `.button(id:)`       → 按住 = 功能修饰键（按住时机械臂锁定，功能键才生效）
 /// - 快门键 `.cameraShutter`   → 扫码配对 / 取消扫码（需按住扳机）
 /// - 翻转键 `.cameraFlip`      → 连接 Mac / 断开（需按住扳机）
-/// - 智控轮盘 `.cameraZoom`    → 亮度调节（需按住扳机；factor 增量 → 亮度增减，基线始终更新防跳变）
+/// - 智控轮盘 `.cameraZoom`    → 数码变焦（需按住扳机；factor 增量 → 倍率增减，基线始终更新防跳变）
 ///
 /// 状态感知（L1）：订阅 dock/undock + 电量（iOS 18+），UI 显示云台 pill。
 /// 模拟器与无配件环境全路径优雅降级：所有 DockKit 调用失败仅记录日志。
@@ -68,14 +68,14 @@ final class GimbalManager: ObservableObject {
     // MARK: - 按键动作（ContentView 注入，全部 MainActor 上下文执行）
     var onShutter: (() -> Void)?            // 快门键 → 扫码/取消扫码
     var onFlip: (() -> Void)?               // 翻转键 → 连接/断开
-    var onZoomDelta: ((Double) -> Void)?    // 轮盘增量 → 亮度调节
+    var onZoomDelta: ((Double) -> Void)?    // 轮盘增量 → 数码变焦（ADR-019）
 
 #if canImport(DockKit)
     private var managerTask: Task<Void, Never>?
     private var accessoryTasks: [Task<Void, Never>] = []
     /// docked 期间持有的配件，供事件/电量流使用
     private var accessory: DockAccessory?
-    /// 轮盘变焦倍率基线：首个 cameraZoom 事件只建基线不动作，防止亮度跳变
+    /// 轮盘变焦倍率基线：首个 cameraZoom 事件只建基线不动作，防止变焦跳变
     private var lastZoomFactor: Double?
     /// 记录本 App 是否关闭过系统追踪，退出时据此恢复
     private var trackingDisabledByUs = false
@@ -221,7 +221,7 @@ final class GimbalManager: ObservableObject {
                     guard triggerHeld else { continue }
                     onFlip?()
                 case .cameraZoom(let factor):
-                    // 轮盘给的是绝对变焦倍率；转亮度用增量：基线始终更新，动作只在扳机按住时触发
+                    // 轮盘给的是绝对变焦倍率；转 App 变焦用增量：基线始终更新，动作只在扳机按住时触发
                     if let last = lastZoomFactor {
                         let delta = factor - last
                         reportEvent("轮盘 Δ\(String(format: "%.2f", delta)) (held=\(triggerHeld))")

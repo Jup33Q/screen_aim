@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  AimPhone（iOS 端）— 全部 UI：相机预览、瞄准十字、亮度手势、扫码遮罩、云台 pill
+//  AimPhone（iOS 端）— 全部 UI：相机预览、瞄准十字、亮度手势、二指/轮盘变焦、扫码遮罩、云台 pill
 //
 //  关键约束：预览旋转由 RotationCoordinator 驱动（ADR-002）；太阳按钮为单一
 //  DragGesture 状态机（ADR-005/006 见 docs/decisions.md）；玻璃效果走 glass* 兼容封装
@@ -107,6 +107,9 @@ struct ContentView: View {
     @State private var dragStartBrightness: Float = 0.15
     @State private var brightnessActive = false     // 太阳按钮长按激活中（黄色高亮 + 亮度条展开）
     @State private var lastTickStep = -1            // 亮度调节触觉反馈的刻度记录
+    @State private var pinchZoomBaseline = 1.0      // 二指变焦手势的起始倍率（onEnded 时固化）
+    @State private var lastZoomTick = -1            // 二指变焦刻度触觉的记录
+    @State private var zoomSnapped = false          // 当前是否吸附在刻度上（磁滞状态）
     // 太阳按钮按压状态机（单一 DragGesture 实现，避免 Tap/LongPress 手势竞争）
     @State private var pressActive = false          // 手指正按在按钮上
     @State private var pressActivated = false       // 本次按压是否已触发长按激活
@@ -127,6 +130,30 @@ struct ContentView: View {
             lastTickStep = step
             UISelectionFeedbackGenerator().selectionChanged()
         }
+    }
+
+    /// 二指变焦刻度触觉：每跨 0.1× 刻度给一下轻冲击。
+    /// 用 UIImpactFeedbackGenerator(.light) 而非 selectionChanged——真机实测后者太弱感知不到
+    private func tickZoom(_ z: Double) {
+        let step = Int(z / 0.1)
+        if step != lastZoomTick {
+            lastZoomTick = step
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+    }
+
+    /// 刻度吸附（0.1× 步进）：距最近刻度 <0.02 时吸住；吸住后需偏出 >0.03 才脱开
+    ///（磁滞防边界抖动/反复触发触觉）。只在二指手势路径用，轮盘有物理刻度不需要
+    private func snapZoom(_ z: Double) -> Double {
+        let step = 0.1
+        let nearest = (z / step).rounded() * step
+        let threshold = zoomSnapped ? 0.03 : 0.02
+        if abs(z - nearest) < threshold {
+            zoomSnapped = true
+            return nearest
+        }
+        zoomSnapped = false
+        return z
     }
 
     /// 状态着色：connected=绿 / transitional=橙 / error=红 / idle=灰
@@ -175,12 +202,8 @@ struct ContentView: View {
                 if streamer.isConnected || streamer.isConnecting { streamer.disconnect() }
                 else { streamer.connect(host: macHost, port: UInt16(macPort) ?? 9100) }
             }
-            gimbal.onZoomDelta = { delta in   // 智控轮盘：增量 → 亮度（一格约 5%）
-                let v = min(max(brightness + Float(delta) * 0.5, 0), 1)
-                guard v != brightness else { return }
-                brightness = v
-                streamer.setBrightness(v)
-                tickBrightness(v)
+            gimbal.onZoomDelta = { delta in   // 智控轮盘：增量 → 数码变焦（一格约 5%，ADR-019）
+                streamer.adjustZoom(delta: delta)
             }
             gimbal.start()
         }
@@ -210,8 +233,24 @@ struct ContentView: View {
             let landscape = geo.size.width > geo.size.height
             ZStack {
                 // 全屏相机画面（旋转由 RotationCoordinator 跟随界面方向，画面随屏幕正立）
+                // 二指缩放 = 数码变焦（ADR-019）：倍率 = 起手基线 × 手势比例，钳 1×–3×，
+                // 0.1× 刻度 + 磁滞吸附 + 轻冲击触觉；扫码遮罩/鼠标触控层压在上方时手势自然不触发
                 CameraPreview(session: streamer.session)
                     .ignoresSafeArea()
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { scale in
+                                let raw = min(max(pinchZoomBaseline * scale, 1), streamer.maxDigitalZoom)
+                                let z = snapZoom(raw)
+                                streamer.setZoomFactor(z)
+                                tickZoom(z)
+                            }
+                            .onEnded { scale in
+                                let raw = min(max(pinchZoomBaseline * scale, 1), streamer.maxDigitalZoom)
+                                pinchZoomBaseline = snapZoom(raw)   // 固化到吸附后的刻度值
+                                zoomSnapped = false
+                            }
+                    )
 
                 if streamer.scanning {
                     // 扫码模式：暗化遮罩 + 镂空取景框（取消走底部胶囊里的同一按钮）
@@ -238,6 +277,15 @@ struct ContentView: View {
                     if !streamer.scanning {
                         HStack {
                             Spacer()
+                            // 数码变焦倍率指示（ADR-019：隐形映射禁止，>1× 时常驻显示）
+                            if streamer.zoomFactor > 1.01 {
+                                Text(String(format: "%.2g×", streamer.zoomFactor))
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                                    .glassCapsule()
+                            }
                             markerBadge
                         }
                         .padding(.trailing, 12)
@@ -528,7 +576,7 @@ struct ContentView: View {
 
     // MARK: - 云台状态 pill（DockKit：型号/电量 + 扳机门控的按键功能图例）
     /// 图例逻辑：scope=扳机（按住时黄色高亮），其右侧三个功能图标只在扳机按住时点亮：
-    /// sun.max=轮盘调亮度 · qrcode.viewfinder=快门扫码 · link=翻转键连接/断开
+    /// plus.magnifyingglass=轮盘数码变焦 · qrcode.viewfinder=快门扫码 · link=翻转键连接/断开
     private var gimbalPill: some View {
         HStack(spacing: 8) {
             Image(systemName: "gyroscope")
@@ -551,8 +599,8 @@ struct ContentView: View {
                 .accessibilityLabel("扳机")
             // 功能键：扳机按住时点亮
             HStack(spacing: 6) {
-                Image(systemName: "sun.max")
-                    .accessibilityLabel("轮盘调亮度")
+                Image(systemName: "plus.magnifyingglass")
+                    .accessibilityLabel("轮盘数码变焦")
                 Image(systemName: "qrcode.viewfinder")
                     .accessibilityLabel("快门键扫码")
                 Image(systemName: "link")

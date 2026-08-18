@@ -96,18 +96,43 @@ final class CameraStreamer: NSObject, ObservableObject {
         }
     }
 
-    // MARK: 云台按键映射（DockKit accessoryEvents → AVFoundation）
+    // MARK: 云台按键映射（DockKit accessoryEvents → AVFoundation）+ 数码变焦
 
-    /// 智控轮盘变焦：factor 为绝对变焦倍率，钳制到当前设备支持范围
+    /// 当前数码变焦倍率（主线程只读：二指手势基线 / 轮盘增量基数 / UI 倍率显示）
+    @Published private(set) var zoomFactor: Double = 1.0
+    /// 变焦权威值（videoQueue）；与 zoomFactor 同源，避免手势高频回调跨线程读设备
+    private var zoomFactorRaw: Double = 1.0
+    /// 数码变焦上限：720p 输出宽 1280，12MP 传感器宽约 4032——≈3.1× 以内仍是欠采样
+    /// 裁切、不丢有效分辨率（plan 原保守值 2×，2026-08-18 真机反馈后按传感器算术放宽到
+    /// 3×）；再往上开始插值放大且缩视野丢标记
+    let maxDigitalZoom: Double = 3.0
+
+    /// 数码变焦（绝对倍率）：二指缩放手势与云台轮盘共用的执行入口（ADR-019）。
+    /// 纯数码裁切不改变对焦距离，对焦锁定（ADR-018）在变焦后照常有效
     func setZoomFactor(_ factor: Double) {
+        videoQueue.async { [weak self] in self?.applyZoom(factor) }
+    }
+
+    /// 云台轮盘变焦增量：一格 ≈ ±5%（乘法增量，沿用原亮度映射系数），扳机门控在事件层
+    func adjustZoom(delta: Double) {
         videoQueue.async { [weak self] in
-            guard let device = self?.activeDevice else { return }
-            let clamped = min(max(CGFloat(factor), device.minAvailableVideoZoomFactor),
-                              device.maxAvailableVideoZoomFactor)
-            try? device.lockForConfiguration()
-            device.videoZoomFactor = clamped
-            device.unlockForConfiguration()
+            guard let self else { return }
+            self.applyZoom(self.zoomFactorRaw * (1 + delta * 0.5))
         }
+    }
+
+    /// 变焦执行核心（videoQueue）：钳制 [设备下限, min(3×, 设备上限)] 后写设备并发布状态
+    private func applyZoom(_ factor: Double) {
+        guard let device = activeDevice else { return }
+        let cap = min(CGFloat(maxDigitalZoom), device.maxAvailableVideoZoomFactor)
+        let clamped = min(max(CGFloat(factor), device.minAvailableVideoZoomFactor), cap)
+        // 变化量过小不动设备：手势/轮盘高频回调下避免反复 lockForConfiguration
+        guard abs(Double(clamped) - zoomFactorRaw) > 0.005 else { return }
+        try? device.lockForConfiguration()
+        device.videoZoomFactor = clamped
+        device.unlockForConfiguration()
+        zoomFactorRaw = Double(clamped)
+        DispatchQueue.main.async { self.zoomFactor = self.zoomFactorRaw }
     }
 
     /// 翻转键：前后摄切换；新设备失败时回滚旧输入，配置沿用 applyDeviceSettings
@@ -298,6 +323,9 @@ final class CameraStreamer: NSObject, ObservableObject {
         focusBadCount = 0
         focusLockSupported = device.isFocusModeSupported(.locked)
             && device.isLockingFocusWithCustomLensPositionSupported
+        // 切换前后摄后新设备从 1× 起步，同步变焦状态（防 UI 倍率显示残留旧值）
+        zoomFactorRaw = 1.0
+        DispatchQueue.main.async { self.zoomFactor = 1.0 }
         try? device.lockForConfiguration()
         device.focusMode = .continuousAutoFocus
         // 不支持点对焦的设备（部分前摄）保持默认对焦区域

@@ -21,10 +21,15 @@
 
 ## P1 — 轮盘手动对焦微调 + 对焦状态可见
 
+> 执行状态（2026-08-18）：轮盘目标已经用户确认为**数码变焦**而非对焦微调——
+> 变焦双输入（二指手势 + 轮盘）已实施（ADR-019），含跨 0.25× 刻度触觉与 >1× 倍率指示。
+> 下列对焦微调条目暂缓：`nudgeFocus` 未写，轮盘不加目标切换态；`requestRefocus()`
+> 解锁入口已在 P0 预留。
+
 - [ ] `CameraStreamer` 新增 `nudgeFocus(delta:)`：KVO 读当前 `lensPosition` 为基线，±步进微调（lensPosition 非线性且机型相关，禁止硬编码距离）
-- [ ] 轮盘目标决策：扳机+轮盘从亮度换成对焦微调（屏幕亮度条手势保留亮度），或加"轮盘目标"循环切换态——实现前与用户确认
-- [ ] `GimbalManager` 事件层不动，只改 ContentView 注入的闭包路由
-- [ ] 视觉/触觉确认：pill 加对焦图标 + lensPosition 读数；微调跨刻度给 `UISelectionFeedbackGenerator`（遵守 skill DON'T：隐形映射禁止）
+- [x] 轮盘目标决策：~~扳机+轮盘从亮度换成对焦微调，或加"轮盘目标"循环切换态~~ → 已确认轮盘 = 数码变焦（ADR-019），亮度留太阳滑杆
+- [ ] `GimbalManager` 事件层不动，只改 ContentView 注入的闭包路由（变焦路由已按此落地）
+- [x] 视觉/触觉确认（变焦部分）：>1× 倍率指示 pill + 跨刻度 `UISelectionFeedbackGenerator`；对焦图标 + lensPosition 读数随对焦微调一起暂缓
 - [ ] `isSmoothAutoFocusEnabled = true`（配合锁定策略，收敛慢的代价被覆盖）
 
 ## P1.5 — 点按对焦（原生相机语义，Liquid Glass 风格）
