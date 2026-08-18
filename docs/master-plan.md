@@ -18,14 +18,15 @@
 | 白点滞后 WP-L1：Mac 显示段 60Hz 匀速死推算外推 | ADR-015，whitedot-latency-plan |
 | 传输层 TLV 迁移 P0–P3：单连接复用 9100、旧链路拆除 | ADR-011，transport-26-plan |
 | TLV 防阻塞 P0（CapturePipeline 有界背压）+ P1 Step 1（回传 pacing 12MB/s） | tlv-blocking-optimization-plan |
-| fast 时敏通道（localAim 独立连接躲 HoL 阻塞）+ MarkerDetector prefilter 预筛 | ADR-017，**工作区未提交改动** |
+| fast 时敏通道（localAim 独立连接躲 HoL 阻塞）+ MarkerDetector prefilter 预筛 | ADR-017，commit c3c442c（2026-08-18 收尾提交，真机冒烟通过） |
+| 扫码途中连上 scanning 卡死修复 + 配对按钮合并（扫码/Mac二维码开关合一） | commit a794810（B1 期间用户插入批，真机三项验证通过） |
 | IMU WP-I1 代码（MotionSampler 100Hz + meta.jsonl 落盘） | imu-fusion-plan §1；录制中断于手机散热 |
 
 ### 未完成 ⏳（即本路线图调度对象）
 
 | 编号 | 事项 | 所属子 plan | 状态要点 |
 |---|---|---|---|
-| U1 | update-rate P0–P4（Release 固化 / 无检出降频 / 识别解耦 / 降采样 bench / 30fps） | [update-rate-optimization-plan.md](update-rate-optimization-plan.md) | 待实施；2026-08-18 实测 Debug 构建 detect 640ms、速率 1.5Hz 是直接触发因 |
+| U1 | update-rate P0–P4（Release 固化 / 无检出降频 / 识别解耦 / 降采样 bench / 30fps） | [update-rate-optimization-plan.md](update-rate-optimization-plan.md) | **B1 进行中**：P0 固化已落地（project.yml scheme，showBuildSettings=-O 已验证；即兴实测 Release det 中位 9.8ms/30Hz），待真机三段验收（静止/横扫/贴边角分别录制）后提交；P1 未动；P2–P4 待实施 |
 | U2 | tlv-blocking P2：iOS 发送侧弱网丢帧闸门（videoInFlight） | [tlv-blocking-optimization-plan.md](tlv-blocking-optimization-plan.md) §3 | 待实施；与 U1 的 P2 同文件（CameraStreamer/TLVTransport），宜同批 |
 | U3 | whitedot-latency WP-L2：识别/上报提频 15→30Hz 评估 | [whitedot-latency-plan.md](whitedot-latency-plan.md) §2 | **与 U1 的 P4 是同一件事**——并入 P4 验收，不单独做 |
 | U4 | IMU WP-I1 续跑（录制被散热中断）→ WP-I2（Mac 显示段 IMU 外推）→ WP-I3（识别段传播，评估门控） | [imu-fusion-plan.md](imu-fusion-plan.md)、[imu-wp-i1-resume-prompt.md](imu-wp-i1-resume-prompt.md) | 代码就绪，差录制与分析 |
@@ -36,9 +37,11 @@
 
 ### 未提交工作区改动（任何批次动手前先处理）
 
-`git status` 现有 10 个文件未提交（FrameServerV2/main/MarkerDetector/TLVMessageType +
-docs 一批）= ADR-017 fast 通道 + prefilter 预筛。**第一批执行前先把这批改动
-验收提交**（否则后续每批的 diff 与回退边界都会被污染）。
+2026-08-18 B1 收尾提交（c3c442c）已完成，工作区代码侧干净。当前未提交仅
+P0 固化的 3 个文件（`ios/project.yml`、`docs/development.md`、`README.md`）——
+**故意挂起**：P0 commit 需真机三段验收数据写进 message，验收随下一批执行。
+另有两个疑似 Finder 误复制的垃圾项待用户确认后清理：`ios/AimPhone 2.xcodeproj/`、
+`ios/AimPhone/Info 2.plist`（后者会被打进 .app 资源，虽无害但属污染）。
 
 ## 1. 优先级与批次
 

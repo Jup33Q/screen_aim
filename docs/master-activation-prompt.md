@@ -7,53 +7,14 @@
 
 ---
 
-## 批次 B1（速率·速效：收尾提交 → P0 Release 固化 → P1 无检出降频）
+## 批次 B1（速率·速效：P0 Release 固化 → P1 无检出降频）——进行中，用续跑提示词
 
-```text
-# 任务：ScreenAim 总路线图 B1（速率优化·速效批）
-
-工作目录：/Users/jup33q/Documents/kimi/screen_aim
-背景：2026-08-18 实测——Debug 构建上真机致手机端 detect_ms 8–15ms→640ms、localAim
-8–15Hz→1.5Hz（数据见 docs/update-rate-optimization-plan.md §0.1）。网络层已排查健康，
-不要动网络代码。
-
-## 动手前必读（按顺序，全部读完再写代码）
-1. docs/master-plan.md —— 总路线图：§0.2 未提交改动清单、§3 全局硬约束
-2. docs/update-rate-optimization-plan.md —— 本批任务书：§0 根因、§1/§2 改动清单、§6 验收方法
-3. docs/comment-style.md —— 注释五级体系规范，违反视为不合格
-4. docs/architecture.md —— 线程模型；docs/decisions.md —— ADR-009/013/017
-
-## 执行内容（三步，顺序不可换）
-0. 收尾提交：工作区现有未提交改动 = ADR-017 fast 时敏通道 + MarkerDetector
-   prefilter 预筛。先验收（self-test + iOS 编译 + 真机冒烟：配对/白点/鼠标/断开兜底）
-   再提交，message 写明验收结果。后续批次的 diff 边界依赖这步。
-1. P0 Release 固化：ios/project.yml 用 XcodeGen scheme 把 Run 的 Build Configuration
-   固定为 Release；docs/development.md 补排错项「detect_ms 突然涨几十倍 → 检查是否
-   Debug 构建上机」，根 README 手机端小节注明日常真机验证用 Release
-2. P1 无检出降频：CameraStreamer.swift 识别间隔两档（满速 1/15s / 降频 0.3s，
-   常量集中文件头部）；连续 0 检出满 10 次进降频档，检出即回满速；安全性论证
-   按 plan §2.3 写 NOTE（门槛 10 > 滑行预算 5）；扫码/JPEG 发送/captureRecorder 不动
-
-## 硬约束
-- 不改 TLV 线上格式；localAim 字段只加不删；不改 UI；像素数据不进主线程
-- 每步完成后：swift build && swift run ScreenAim --self-test；
-  iOS 改动后 cd ios && xcodegen generate && xcodebuild -project AimPhone.xcodeproj
-  -scheme AimPhone -destination 'generic/platform=iOS' build（签名失败可接受）
-- P0 额外验证：xcodebuild -showBuildSettings 确认 Run 配置 SWIFT_OPTIMIZATION_LEVEL=-O
-- 每步一个 git commit，message 写明实测 vs 门槛
-
-## 验收门槛（不过门槛不得进入下一步）
-- P0：真机 Release 部署按 plan §6 跑 ≥3 分钟会话：detect_ms 中位 ≤ 20ms，
-  localAim 速率 ≥ 8Hz（分析最新 scenes/localaim_*.csv，注明构建配置）
-- P1：镜头移开屏幕 5 秒后 LOCALAIM 日志间隔降到 ~300ms；移回 1 秒内恢复满速；
-  白点（含边角 3 标记仿射兜底）行为与改动前一致
-
-## 交付物
-1. 收尾提交 + 各步改动文件清单（逐个说明改了什么）
-2. P0/P1 验收小结（实测值 vs 门槛，注明机型/系统/标记尺寸/构建配置）
-3. docs/development.md、根 README、docs/modules.md 同步
-4. 未决风险与 B2（识别解耦 + 发送侧丢帧闸门）的准备情况
-```
+> 2026-08-18 进度：B1 第 0 步收尾提交（c3c442c）与插入批（a794810 扫码修复 +
+> 配对按钮合并）已入库；P0 代码/文档已落地未提交（待三段验收）；P1 未动。
+> **续跑直接用 [update-rate-activation-prompt.md](update-rate-activation-prompt.md)
+> 的「第一批（续跑）提示词」**，内容覆盖：P0 三段验收（静止/横扫/贴边角分别
+> 录制）→ P0 commit → P1 实施与验收 → P1 commit → docs 同步与 B2 准备情况。
+> 原 B1 提示词（收尾提交 + P0 + P1 全量）已被实际执行覆盖，仅存档于 git 历史。
 
 ---
 

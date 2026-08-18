@@ -1,6 +1,9 @@
 # 更新速率优化方案（手机端识别提速 · P0–P4）
 
-> 状态：**待实施**。激活提示词见 [update-rate-activation-prompt.md](update-rate-activation-prompt.md)。
+> 状态：**B1 进行中**——P0 已实施（2026-08-18，project.yml scheme 固化 Release，
+> showBuildSettings=-O 已验证，即兴实测 Release det 中位 9.8ms / localAim 30Hz），
+> 待真机三段验收（静止/横扫/贴边角分别录制）后提交；P1 未动；P2–P4 待实施。
+> 激活提示词见 [update-rate-activation-prompt.md](update-rate-activation-prompt.md)。
 > 前置阅读：[architecture.md](architecture.md)（线程模型）、[protocol.md](protocol.md) §7/§11、
 > [comment-style.md](comment-style.md)、[decisions.md](decisions.md) ADR-009/015/017、
 > [aim-filter-tuning.md](aim-filter-tuning.md)。
@@ -58,9 +61,14 @@ CapturePipeline 有界背压（tlv-blocking-optimization-plan P0）、看门狗�
 
 - `cd ios && xcodegen generate && xcodebuild -project AimPhone.xcodeproj -scheme AimPhone
   -showBuildSettings | grep SWIFT_OPTIMIZATION_LEVEL`：Run 配置对应 `-O`（非 `-Onone`）
+  ——2026-08-18 已验证：scheme LaunchAction buildConfiguration=Release，`-O` + wholemodule ✅
 - 真机部署后跑 §6 会话验收：detect_ms 中位 ≤ 20ms，localAim 速率 ≥ 8Hz
+  ——进行中：即兴 213s 混合会话（Release，iPhone 15 Pro Max）det 中位 9.8ms / p90 10.6ms、
+  到达间隔中位 33ms（30.3Hz）已达标；正式三段录制（静止/横扫/贴边角各 1 分钟
+  独立 CSV）待手机降温后补录
 - `docs/development.md` 补一条排错项：「真机 detect_ms 突然涨几十倍 → 检查是否
   Debug 构建上机」；根 README「手机端」小节注明日常真机验证用 Release 构建
+  ——2026-08-18 已完成（随 P0 commit 一并提交）
 
 ## 2. P1：无标记自适应降频（小改动，防卡死 + 省电）
 
