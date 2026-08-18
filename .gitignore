@@ -9,3 +9,13 @@ ios/build/
 __pycache__/
 *.pyc
 icons/ScreenAimLauncher.app/
+
+# Experimental / temporary directories
+scenes/
+logo_gen/
+pixel2motion/
+collatz_meta_analysis/
+
+# Xcode duplicate artifacts
+ios/AimPhone 2.xcodeproj/
+ios/AimPhone/Info 2.plist

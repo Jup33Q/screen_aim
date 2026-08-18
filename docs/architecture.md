@@ -61,7 +61,8 @@ iPhone 相机对着 Mac 屏幕 → Mac 识别屏幕四角的 ArUco 标记 → �
 | `screenaim.server` / `screenaim.conn` | NWListener  accept 与读帧、控制帧内联分发 |
 | `screenaim.frames`（串行） | 手机视频帧的 `processJPEG`（识别慢于到达率时丢旧帧保最新） |
 | main runloop（Mac） | Calibrator 窗口、定时器、`onAim` 消费方 |
-| `aimphone.capture`（串行，iOS） | 采集回调、JPEG 编码、扫码识别、曝光/变焦/翻转配置 |
+| `aimphone.capture`（串行，iOS） | 采集回调、JPEG 编码、扫码识别、曝光/变焦/翻转/对焦配置 |
+| `aimphone.localize`（串行，iOS，CR2） | 本机识别（localizeFrame）+ 采集录制；busy 闸门 `localizeInFlight` 丢旧保新（与 `screenaim.frames` 的 `frameInFlight` 同构），识别慢只被动降识别频率，不阻塞推流 |
 | `@MainActor`（iOS） | GimbalManager 全部状态与事件分发、UI |
 
 约定：**像素数据永不进主线程**；UI 状态全部通过 `@Published` 回主线程。

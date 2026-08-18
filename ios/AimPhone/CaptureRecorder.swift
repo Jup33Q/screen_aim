@@ -2,7 +2,8 @@
 //  CaptureRecorder.swift
 //  AimPhone（iOS 端）— 识别算法优化用的真机数据采集器：无损 PNG 逐帧录制 + 元数据
 //
-//  关键约束：全部在 aimphone.capture 串行队列调用（像素数据不进主线程）；
+//  关键约束：全部在 aimphone.localize 串行队列调用（CR2 前为 aimphone.capture，
+//  随 localizeFrame 一并迁出；像素数据不进主线程）；
 //  录制的必须是检测器实际看到的像素（无损 PNG，禁止重编码），否则离线回放失真
 //
 
@@ -38,7 +39,8 @@ struct CaptureFrameMeta {
 }
 
 /// 采集录制器：start 后到点自动 finish；PNG 与 meta.jsonl 写临时目录，上传由调用方负责。
-/// NOTE: PNG 编码（720p ≈ 30–60ms/帧）在 videoQueue 上同步执行，5fps 抽帧下不影响采集链路。
+/// NOTE: PNG 编码（720p ≈ 30–60ms/帧）在 localizeQueue 上同步执行（CR2 随迁），
+/// 5fps 抽帧下会占用识别队列拖慢识别，但不再阻塞 videoQueue 推流（换受害者，可接受）。
 /// meta.jsonl 每帧延迟一帧写出（pendingMeta）：为 WP-I1 的 motion 字段补齐帧 PTS
 /// 前后各 0.15s 的 100Hz 运动样本；字段只加不删，旧回放/分析工具不受影响
 final class CaptureRecorder {

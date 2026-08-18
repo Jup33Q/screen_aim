@@ -1,8 +1,10 @@
 # 更新速率优化方案（手机端识别提速 · P0–P4）
 
-> 状态：**B1 进行中**——P0 已实施（2026-08-18，project.yml scheme 固化 Release，
-> showBuildSettings=-O 已验证，即兴实测 Release det 中位 9.8ms / localAim 30Hz），
-> 待真机三段验收（静止/横扫/贴边角分别录制）后提交；P1 未动；P2–P4 待实施。
+> 状态：**B1 进行中**——P0 ✅（2026-08-18 真机三段验收过门并提交 a99d940：静止/横扫/
+> 贴边角 det 中位 14.1/11.0/9.3ms ≤ 20ms、localAim 30–31Hz ≥ 8Hz，iPhone 15 Pro Max /
+> iOS 26 / 48pt / Release）；**P1 已回退**（2026-08-18，恒定回报率原则 ADR-020，
+> 见 [constant-report-rate-plan.md](constant-report-rate-plan.md)）；**P2 已由 CR2 实施**
+> （识别解耦 + busy 闸门，同批落地）；P3–P4 待实施。
 > 激活提示词见 [update-rate-activation-prompt.md](update-rate-activation-prompt.md)。
 > 前置阅读：[architecture.md](architecture.md)（线程模型）、[protocol.md](protocol.md) §7/§11、
 > [comment-style.md](comment-style.md)、[decisions.md](decisions.md) ADR-009/015/017、
@@ -63,14 +65,20 @@ CapturePipeline 有界背压（tlv-blocking-optimization-plan P0）、看门狗�
   -showBuildSettings | grep SWIFT_OPTIMIZATION_LEVEL`：Run 配置对应 `-O`（非 `-Onone`）
   ——2026-08-18 已验证：scheme LaunchAction buildConfiguration=Release，`-O` + wholemodule ✅
 - 真机部署后跑 §6 会话验收：detect_ms 中位 ≤ 20ms，localAim 速率 ≥ 8Hz
-  ——进行中：即兴 213s 混合会话（Release，iPhone 15 Pro Max）det 中位 9.8ms / p90 10.6ms、
-  到达间隔中位 33ms（30.3Hz）已达标；正式三段录制（静止/横扫/贴边角各 1 分钟
-  独立 CSV）待手机降温后补录
+  ——2026-08-18 ✅ 正式三段录制过门（各段独立 CSV 尾 60s 窗，iPhone 15 Pro Max /
+  iOS 26 / 48pt / Release）：静止（云台）det 中位 14.1 / p90 14.7 / max 16.2ms、
+  31.2Hz、aim 100%；横扫 det 中位 11.0 / p90 12.3 / max 13.9ms、30.3Hz、aim 66.9%
+  （x 扫出 -92–2127pt）；贴边角 L 簇 det 中位 9.3 / p90 9.8 / max 10.9ms、30.3Hz、
+  aim 89.6%（affine 154 帧）
 - `docs/development.md` 补一条排错项：「真机 detect_ms 突然涨几十倍 → 检查是否
   Debug 构建上机」；根 README「手机端」小节注明日常真机验证用 Release 构建
   ——2026-08-18 已完成（随 P0 commit 一并提交）
 
 ## 2. P1：无标记自适应降频（小改动，防卡死 + 省电）
+
+> **已回退**（2026-08-18）：频率跳变本身是白点抖动源（恢复满速时 300ms 级大 dt 污染
+> 滤波器），且 P0 Release 固化后原始论据已消失。决策见 ADR-020 恒定回报率原则与
+> [constant-report-rate-plan.md](constant-report-rate-plan.md)；下方原文留档不再实施。
 
 **目标**：连续 0 检出时识别自动退到低频档，不再满速烧 CPU 挤占推流；
 检出恢复立即回满速。Debug 构建误上线时也不会把推流压死。
@@ -100,6 +108,12 @@ CapturePipeline 有界背压（tlv-blocking-optimization-plan P0）、看门狗�
   移回屏幕 1 秒内恢复满速识别；白点行为（含边角 3 标记仿射兜底）与改动前一致
 
 ## 3. P2：识别挪出采集串行队列（解耦，busy 闸门丢旧保新）
+
+> **已由 CR2 实施**（2026-08-18）：作为去主动降频的硬依赖兜底随
+> [constant-report-rate-plan.md](constant-report-rate-plan.md) 同批落地（ADR-020）。
+> `localizeQueue` + `localizeInFlight` busy 闸门 + CVPixelBuffer 跨队列 retain/release
+> 均已入库；对焦状态机喂入、采集录制（captureRecorder start/finish/record）随迁
+> localizeQueue，localizer 标定下发同步随迁。
 
 **目标**：识别耗时不再阻塞 JPEG 编码与发送——发送稳定打满 15fps 闸门，
 识别慢时只降低本机识别/上报频率，不再拖垮整条推流链路。
@@ -189,13 +203,13 @@ python3 tools/plot_localaim.py   # 或按 README 指示分析 scenes/localaim_�
 | 顺序 | 阶段 | 影响文件 | 文档同步 |
 |---|---|---|---|
 | 1 | P0 Release 固化 | `ios/project.yml`（或 Xcode scheme） | development.md 排错项、根 README |
-| 2 | P1 无检出降频 | `ios/AimPhone/CameraStreamer.swift` | modules.md CameraStreamer 条目 |
-| 3 | P2 识别解耦 | `ios/AimPhone/CameraStreamer.swift` | architecture.md 线程模型、modules.md、ADR-018 |
+| 2 | P1 无检出降频（**已回退**，ADR-020） | `ios/AimPhone/CameraStreamer.swift` | modules.md CameraStreamer 条目 |
+| 3 | P2 识别解耦（**已由 CR2 实施**，ADR-020） | `ios/AimPhone/CameraStreamer.swift` | architecture.md 线程模型、modules.md、ADR-020 |
 | 4 | P3 降采样（bench 门控） | `Sources/ScreenAimCore/MarkerDetector.swift` | modules.md、bench 数据进验收小结 |
 | 5 | P4 30fps（可选） | `ios/AimPhone/CameraStreamer.swift` | protocol.md §1、根 README 实测表 |
 
 - 每阶段独立验收、独立 commit（message 写明实测 vs 门槛）、单文件级可回退
 - P0/P1/P2 彼此无依赖可分开上；P3 依赖 bench 工具链；P4 必须在 P0–P2 之后评估
-- 决策记录：P1+P2 合并记 **ADR-018**（手机端识别调度：Release 固化 + 队列解耦 +
-  无检出降频），写明 2026-08-18 实测数据依据；P3/P4 若达标各记一条或在 ADR-018 追加
+- 决策记录：P1 已回退、P2 由 CR2 实施，合并记 **ADR-020**（恒定回报率原则，
+  2026-08-18）；P3/P4 若达标各记一条新 ADR
 - 真机回归基线（每阶段后）：配对/标定下发/白点/鼠标三键+滚轮/断开兜底/采集回传

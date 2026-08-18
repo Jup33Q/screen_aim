@@ -2,7 +2,8 @@
 //  CameraStreamer.swift
 //  AimPhone（iOS 端）— 相机采集 + JPEG 推流 + 连接管理 + 扫码配对
 //
-//  关键约束：像素处理/相机配置全在 aimphone.capture 串行队列；帧中心即瞄准点，
+//  关键约束：像素处理/相机配置在 aimphone.capture 串行队列，本机识别（含采集录制、
+//  对焦状态机喂入）在 aimphone.localize 串行队列 + busy 闸门（CR2）；帧中心即瞄准点，
 //  识别与映射在 Mac 端（见 docs/architecture.md、docs/protocol.md）
 //
 
@@ -43,26 +44,25 @@ final class CameraStreamer: NSObject, ObservableObject {
     let localizer = ScreenLocalizer()
     private var lastLocalizeTime: CFAbsoluteTime = 0
 
-    // MARK: 识别调度（无检出自适应降频，update-rate-optimization-plan P1）
-    /// 满速档识别间隔：对齐发送闸门 15Hz——识别比发送更勤没有意义
+    // MARK: 识别调度（恒定 15Hz + busy 闸门被动背压）
+    /// 识别间隔：恒定满速 15Hz，对齐发送闸门——识别比发送更勤没有意义
     ///（原 10ms 门 ≈ 相机每帧都识别，是纯粹的浪费）
     private let localizeIntervalFull: CFAbsoluteTime = 1.0 / 15.0
-    /// 降频档识别间隔：连续无检出时 3.3Hz 保活扫描，标记回到视野后 300ms 内即可恢复满速
-    private let localizeIntervalIdle: CFAbsoluteTime = 0.3
-    /// 进降频档的连续 0 检出次数门槛
-    private let localizeIdleThreshold = 10
-    /// 连续 0 检出（markers.isEmpty）帧计数；仅 videoQueue 访问，检出 >0 立即清零回满速
-    private var consecutiveNoMarkerFrames = 0
-    /// 当前识别间隔：连续 0 检出满 localizeIdleThreshold 次进降频档
-    /// NOTE: 安全性论证——门槛 10 > 断帧滑行预算 maxCoastFrames 5（ADR-013），即降频只在
-    /// 滑行早已耗尽、无输出后才触发，不改变白点滑行语义；`registerNoAim` 的滤波器 reset
-    /// 路径不受影响。只降识别频率：不影响 JPEG 发送闸门、不影响未连接分支扫码
-    ///（checkPairingQR 逻辑不动）、不影响 captureRecorder 录制启动；但录制抽帧由
-    /// localizeFrame 尾部驱动，降频档录制抽帧率随之下降——采集会话期间建议人工保持
-    /// 标记在视野内
-    private var currentLocalizeInterval: CFAbsoluteTime {
-        consecutiveNoMarkerFrames >= localizeIdleThreshold ? localizeIntervalIdle : localizeIntervalFull
-    }
+    /// 识别专用串行队列：识别耗时不再阻塞 videoQueue 上的 JPEG 编码/发送
+    ///（update-rate-optimization-plan P2，经 constant-report-rate-plan CR2 升级为硬依赖兜底）
+    private let localizeQueue = DispatchQueue(label: "aimphone.localize")
+    private let localizeBusy = NSLock()
+    /// busy 闸门标志：识别处理中时新到的识别请求直接丢弃（识别结果可丢，下一帧会覆盖），
+    /// 禁止排队积压。与 Mac 端 main.swift `frameInFlight` 同构——两端同一套被动背压。
+    /// NOTE: 顺序性——busy 闸门保证任一时刻至多一帧在识别，localAim 上报顺序天然保持
+    private var localizeInFlight = false
+    // NOTE: 不主动降频（ADR-020 恒定回报率原则，constant-report-rate-plan）：回报率只由
+    // 被动背压决定，不由识别内容状态调制——降频档恢复满速时的 300ms 级大 dt 会污染
+    // One Euro/速度低通的截止频率自适应，恢复瞬间白点抖动/过冲，且白点重现延迟最坏
+    // ~300ms。替代保护三道：① 上方 busy 闸门（CPU 不足时被动丢旧保新，降帧数不降档位，
+    // 替代原 P1 降频的事故保护角色）；② JA1 发送时间戳 + Mac 端超龄丢弃
+    //（aim-jitter-analysis-plan，过时消息保护）；③ CR3 检测器廉价早退（降单帧成本
+    // 不降频率，bench 门控）。ADR-009「每帧全量上报不抽稀」语义顺势扩展为「不抽稀、不降频」
 
     let session = AVCaptureSession()
     private let videoQueue = DispatchQueue(label: "aimphone.capture")
@@ -253,7 +253,7 @@ final class CameraStreamer: NSObject, ObservableObject {
     /// 覆盖遮挡/移远移近场景；瞬态遮挡（手指掠过 1–2 帧）不触发
     private let focusUnlockThreshold = 10
 
-    /// 每次本机识别后喂入检出数（videoQueue 随 localizeFrame 调用）。
+    /// 每次本机识别后喂入检出数（videoQueue；调用方在 localizeQueue，经 async 跳入，CR2）。
     /// 稳定判定 → setFocusModeLocked 锁定；锁定中恶化 → 解锁回 continuousAutoFocus 重 AF。
     /// NOTE: 稳定信号用标记检出数而非持续监听 KVO isAdjustingFocus——检出率直接反映
     /// 画面可用性（失败链终点），isAdjustingFocus 只在锁定决策点瞬读作 AF 收敛佐证
@@ -578,7 +578,8 @@ extension CameraStreamer {
         sendControl(["type": "mouseScroll", "delta": delta])
     }
 
-    /// 对一帧相机画面做本机 ArUco 检测 + 单应映射（在 videoQueue 上同步执行）。
+    /// 对一帧相机画面做本机 ArUco 检测 + 单应映射（在 localizeQueue 上执行，由
+    /// captureOutput 经 busy 闸门异步派发；对焦状态机 focusFeed 随本函数一起在 localizeQueue）。
     /// 结果回主线程发布；同时打 LOCALAIM 日志并上报 Mac（控制帧）供两端输出对照。
     /// 上报 JSON 含 detected / missing 两个 ID 数组，Mac 端可分辨具体缺哪个定位码；
     /// `detect_ms` 为本帧检测+映射耗时（Phase 0 基线测量用，只加不删保持向后兼容）
@@ -592,14 +593,10 @@ extension CameraStreamer {
         // 传采集 PTS 而非墙钟：滤波器 dt 精度直接影响 One Euro 消抖效果（Phase 1.3）
         let result = localizer.localize(bgra: base, width: w, height: h, bytesPerRow: bpr,
                                         timestamp: timestamp)
-        // 无检出降频档位切换（P1）：连续 0 检出满门槛进 300ms 降频档，任一帧检出即回满速
-        if result.markers.isEmpty {
-            consecutiveNoMarkerFrames += 1
-        } else {
-            consecutiveNoMarkerFrames = 0
-        }
-        // 对焦锁定状态机喂入（P0）：检出数驱动稳定判定/恶化解锁
-        focusFeed(markerCount: result.markers.count)
+        // 对焦锁定状态机喂入（P0）：检出数驱动稳定判定/恶化解锁。调用随 localizeFrame
+        // 迁至 localizeQueue（CR2），状态机本体跳回 videoQueue 执行——focusPhase 等状态
+        // 与设备配置（lockForConfiguration）始终只在 videoQueue 访问，ADR-018 行为不动
+        videoQueue.async { [weak self] in self?.focusFeed(markerCount: result.markers.count) }
         let detectMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         DispatchQueue.main.async {
             self.localMarkerCount = result.markers.count
@@ -607,7 +604,7 @@ extension CameraStreamer {
         }
         let detectedIds = result.markers.map { $0.id }.sorted()
         let missingIds = (0...7).filter { !detectedIds.contains($0) }   // 标记全集 = id0–7（ADR-007）
-        // 每次识别都上报（不抽稀，ADR-009；满速档 ≈15Hz，P1 降频档 3.3Hz）：
+        // 每次识别都上报（不抽稀、不降频，ADR-009/ADR-020；恒定 ≈15Hz）：
         // Mac 端白点覆盖层/debug 对照的流畅度优先于控制信道流量
         //（光标跟随走 Mac 侧视频帧识别，与本上报无关）
         if let aim = result.aim {
@@ -635,6 +632,8 @@ extension CameraStreamer {
         (fastTransport.isConnected ? fastTransport : tlvTransport).sendControl(msg)
         // 数据采集（protocol.md §10）：录制中则抽帧落盘；到点自动 finish 并上传。
         // 注意此时 pb 仍持锁（本函数 defer 解锁），PNG 编码可以直接读
+        // NOTE: 录制期 PNG 编码 30–60ms/帧会占用 localizeQueue 拖慢识别——与原状
+        //（拖慢 videoQueue 推流）相比只是换了受害者，可接受；record 再拆独立队列超出本批范围
         captureRecorder.record(pb: pb, pts: timestamp, result: result, detectMs: detectMs)
         { [weak self] dir, n in
             self?.finishCaptureAndUpload(dir: dir, frames: n)
@@ -647,7 +646,7 @@ extension CameraStreamer {
         }
     }
 
-    /// 结束采集并经主 TLV 连接上传（type 10/11，§11；captureStop 与到点自动停止共用，videoQueue 上调用）
+    /// 结束采集并经主 TLV 连接上传（type 10/11，§11；captureStop 与到点自动停止共用，localizeQueue 上调用）
     private func finishCaptureAndUpload(dir: URL, frames: Int) {
         DispatchQueue.main.async { self.statusText = "采集完成（\(frames) 帧），上传中…" }
         tlvTransport.uploadCapture(dir: dir, total: frames,
@@ -670,7 +669,8 @@ extension CameraStreamer {
             }
             // 冗余标记模式 ≥4 项即接受（ADR-007）；旧版 Mac 只发 4 角也照常工作
             guard map.count >= 4 else { return }
-            videoQueue.async {
+            // localizer 状态全部在 localizeQueue 访问（localizeFrame 已随迁，CR2）
+            localizeQueue.async {
                 self.localizer.screenCornerMap = map
                 // 口语化滤波预设（WP3.4，protocol.md §6：只加不删的可选字段，
                 // 旧版 Mac 不下发则保持编译期默认「日常跟手」）
@@ -689,18 +689,24 @@ extension CameraStreamer {
                 self.pairingQRVisibleOnMac = obj["visible"] as? Bool ?? false
             }
         case "captureStart":
-            // 数据采集触发（protocol.md §10）：Mac 标定层按钮下发，录制走 videoQueue
+            // 数据采集触发（protocol.md §10）：Mac 标定层按钮下发，录制走 localizeQueue
+            //（captureRecorder 全部状态随 localizeFrame 迁至 localizeQueue 单队列访问，CR2）
             let seconds = obj["seconds"] as? Int ?? 10
             let fps = obj["fps"] as? Int ?? 5
-            videoQueue.async {
+            localizeQueue.async {
                 if let err = self.captureRecorder.start(
                     seconds: seconds, fps: fps,
-                    deviceProvider: { [weak self] in self?.activeDevice }) {
+                    // activeDevice 权威在 videoQueue，跨队列读取走 sync 跳队列
+                    //（localizeQueue ≠ videoQueue，无环无死锁；仅录制元数据用，5fps 一次）
+                    deviceProvider: { [weak self] in
+                        guard let self else { return nil }
+                        return self.videoQueue.sync { self.activeDevice }
+                    }) {
                     DispatchQueue.main.async { self.statusText = err }
                 }
             }
         case "captureStop":
-            videoQueue.async {
+            localizeQueue.async {
                 if let (dir, n) = self.captureRecorder.finish() {
                     self.finishCaptureAndUpload(dir: dir, frames: n)
                 }
@@ -729,13 +735,29 @@ extension CameraStreamer: AVCaptureVideoDataOutputSampleBufferDelegate {
                        from connection: AVCaptureConnection) {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // 本机识别：两档间隔门控（满速 15Hz / 连续无检出降频 3.3Hz，见 currentLocalizeInterval），
-        // alwaysDiscardsLateVideoFrames 保证队列不积压，与推流/扫码互不阻塞（同队列顺序执行）
+        // 本机识别：恒定 15Hz 间隔门控（ADR-020 不主动降频；识别不比发送更勤，对齐发送闸门）。
+        // 识别解耦到 localizeQueue 异步执行 + busy 闸门丢旧保新（P2/CR2）：识别慢只被动
+        // 降低本机识别/上报频率，不再阻塞下方 JPEG 编码与发送
         let now0 = CFAbsoluteTimeGetCurrent()
-        if now0 - lastLocalizeTime >= currentLocalizeInterval {
+        if now0 - lastLocalizeTime >= localizeIntervalFull {
             lastLocalizeTime = now0
-            localizeFrame(pb, timestamp: CMTimeGetSeconds(
-                CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
+            localizeBusy.lock()
+            if localizeInFlight {
+                localizeBusy.unlock()
+            } else {
+                localizeInFlight = true
+                localizeBusy.unlock()
+                // WARNING: pb 必须被闭包强引用持有直到识别完成——Swift 中 CF 对象由 ARC
+                // 管理（CVPixelBufferRetain/Release 不可用），强引用即持有，帧不会提前还池；
+                // 切勿改成只拷 baseAddress 指针，那样帧会被采集覆写
+                let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+                localizeQueue.async { [weak self, pb] in
+                    self?.localizeFrame(pb, timestamp: pts)
+                    self?.localizeBusy.lock()
+                    self?.localizeInFlight = false
+                    self?.localizeBusy.unlock()
+                }
+            }
         }
 
         // DEBUG: 帧计数诊断（每 15 帧刷一次 UI，验证回调链路）

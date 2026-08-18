@@ -73,9 +73,9 @@ WP-L1 显示外推（匀速 +33/+66ms 误差 / 静止漂移 / 120ms 封顶），
 | `startBrowsing()` | Bonjour 自动发现 `_aimphone._tcp`（主方案） |
 | `scanQRCode()` / `cancelScan()` | 主动扫码（5 秒窗口逐帧搜索）；未连接时也有 0.3s 间隔的被动扫码 |
 | `onScanned` | 扫码成功回调（UI 回填地址） |
-| `localizeFrame(_:timestamp:)` | 本机识别 + localAim 每次识别都上报（不抽稀，ADR-009）+ 采集抽帧入口；识别间隔两档调度（P1）：满速 `localizeIntervalFull` = 1/15s（对齐发送闸门），连续 0 检出满 `localizeIdleThreshold` = 10 次进降频档 `localizeIntervalIdle` = 0.3s（3.3Hz 保活），任一帧检出即回满速（门槛 10 > 滑行预算 5，ADR-013，不改白点滑行语义） |
+| `localizeFrame(_:timestamp:)` | 本机识别 + localAim 每次识别都上报（不抽稀、不降频，ADR-009/ADR-020）+ 采集抽帧入口；恒定 15Hz 识别（不主动降频，ADR-020）：`localizeIntervalFull` = 1/15s 对齐发送闸门，识别在独立串行队列 `aimphone.localize` 上执行 + NSLock busy 闸门 `localizeInFlight` 丢旧保新（与 Mac 端 `frameInFlight` 同构，CR2；识别慢只被动降识别频率，不阻塞 videoQueue 推流） |
 | `sendMouseDown/Up` / `sendMouseScroll` / `sendMouseClick` | 横屏鼠标模拟器上报（§8）：按下/抬起分离（`button:"all"` 为断连兜底，ADR-008）、滚轮刻度；`sendMouseClick` 为旧协议保留 |
-| 对焦锁定状态机（P0，ADR-018） | 内联两态（focusing/locked）：`focusFeed(markerCount:)` 随 `localizeFrame` 喂入检出数——连续 1s 检出 ≥6/8 且决策点 `isAdjustingFocus == false` → `setFocusModeLocked(lensPosition:)`；锁定中连续 10 次识别 <4 → 解锁重 AF。`applyDeviceSettings` 增补帧中心 `focusPointOfInterest` + `.near` 范围限制；能力不支持静默降级纯 CAF。`requestRefocus()` 为 P1/P1.5 手动干预预留的解锁入口（本批次不接事件） |
+| 对焦锁定状态机（P0，ADR-018） | 内联两态（focusing/locked）：`focusFeed(markerCount:)` 随 `localizeFrame` 喂入检出数（CR2 起调用方在 localizeQueue，经 async 跳回 videoQueue 执行状态机本体）——连续 1s 检出 ≥6/8 且决策点 `isAdjustingFocus == false` → `setFocusModeLocked(lensPosition:)`；锁定中连续 10 次识别 <4 → 解锁重 AF。`applyDeviceSettings` 增补帧中心 `focusPointOfInterest` + `.near` 范围限制；能力不支持静默降级纯 CAF。`requestRefocus()` 为 P1/P1.5 手动干预预留的解锁入口（本批次不接事件） |
 
 ### `TLVTransport.swift`
 
