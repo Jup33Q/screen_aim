@@ -56,6 +56,9 @@ DockKit 行为**模拟器无法验证**；模拟器构建自动降级为空操�
 | 症状 | 先看 |
 |---|---|
 | iPhone 连接一直"连接中" | 本地网络授权弹窗（设置 > AimPhone）；看门狗会自动重试 6 次 |
+| 真机 detect_ms 突然涨几十倍（8–15ms → 数百 ms）、localAim 掉到 ~1Hz | 是否 Debug 构建上机：纯 Swift 检测器对优化等级极敏感（2026-08-18 实测 640ms/帧）。Run scheme 已固化 Release（project.yml schemes），自定义 scheme/命令行部署时检查 `SWIFT_OPTIMIZATION_LEVEL` 为 `-O` |
+| `xcodebuild`/`devicectl` 报 "requires Xcode, but active developer directory … CommandLineTools" | xcode-select 指向 CLT；命令前加 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`（不要 sudo xcode-select 全局切换） |
+| 真机构建 codesign 报 "resource fork, Finder information, or similar detritus not allowed" | `~/Documents` 在 iCloud 同步下，fpfs 扩展属性反复污染 .app；把 `-derivedDataPath` 指到 /tmp（如 `-derivedDataPath /tmp/aimphone-dd`）即可，`xattr -cr` 治标会复发 |
 | 检测不到标记 | 标记太小（< 24pt 屏幕点）/ 没有静区 / 环境光直射屏幕 |
 | 画面横屏翻转 | ADR-002：检查 RotationCoordinator 三个同步时机是否都在 |
 | 云台按键无反应 | 真机？iOS 17.4+？看云台 pill 下的调试事件历史 |

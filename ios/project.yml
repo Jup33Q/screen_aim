@@ -1,6 +1,16 @@
 name: AimPhone
 options:
   bundleIdPrefix: com.screenaim
+# P0 Release 固化（update-rate-optimization-plan §1）：Run 配置固定 Release。
+# 2026-08-18 实测：Debug（-Onone）上真机 detect_ms 8–15ms→640ms、localAim 掉到 1.5Hz；
+# 纯 Swift 检测器对优化等级极敏感，Debug 上机属于事故不是性能回归
+schemes:
+  AimPhone:
+    build:
+      targets:
+        AimPhone: all
+    run:
+      config: Release
 targets:
   AimPhone:
     type: application

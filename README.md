@@ -55,6 +55,8 @@ open ios/AimPhone.xcodeproj          # 打开后选择你的 Development Team，
 ```
 
 - 手机 App 只做：相机采集（720p，锁定 1/60s 曝光抑制屏幕条纹）+ 中心瞄准十字 + JPEG 推流
+- **日常真机验证用 Release 构建**：Run scheme 已由 project.yml 固定为 Release（纯 Swift
+  检测器 Debug 下慢 ~80 倍，2026-08-18 实测 detect_ms 8–15ms→640ms、localAim 1.5Hz）
 - 协议：TCP `[4字节大端长度][JPEG数据]`，15fps，720p，延迟约 100ms
 - Mac 端 `--calibrate --serve 9100` 同时显示悬浮标记并接收手机帧做识别
 - 已用模拟推流验证：60/60 帧全检出，映射输出稳定
