@@ -43,6 +43,27 @@ final class CameraStreamer: NSObject, ObservableObject {
     let localizer = ScreenLocalizer()
     private var lastLocalizeTime: CFAbsoluteTime = 0
 
+    // MARK: 识别调度（无检出自适应降频，update-rate-optimization-plan P1）
+    /// 满速档识别间隔：对齐发送闸门 15Hz——识别比发送更勤没有意义
+    ///（原 10ms 门 ≈ 相机每帧都识别，是纯粹的浪费）
+    private let localizeIntervalFull: CFAbsoluteTime = 1.0 / 15.0
+    /// 降频档识别间隔：连续无检出时 3.3Hz 保活扫描，标记回到视野后 300ms 内即可恢复满速
+    private let localizeIntervalIdle: CFAbsoluteTime = 0.3
+    /// 进降频档的连续 0 检出次数门槛
+    private let localizeIdleThreshold = 10
+    /// 连续 0 检出（markers.isEmpty）帧计数；仅 videoQueue 访问，检出 >0 立即清零回满速
+    private var consecutiveNoMarkerFrames = 0
+    /// 当前识别间隔：连续 0 检出满 localizeIdleThreshold 次进降频档
+    /// NOTE: 安全性论证——门槛 10 > 断帧滑行预算 maxCoastFrames 5（ADR-013），即降频只在
+    /// 滑行早已耗尽、无输出后才触发，不改变白点滑行语义；`registerNoAim` 的滤波器 reset
+    /// 路径不受影响。只降识别频率：不影响 JPEG 发送闸门、不影响未连接分支扫码
+    ///（checkPairingQR 逻辑不动）、不影响 captureRecorder 录制启动；但录制抽帧由
+    /// localizeFrame 尾部驱动，降频档录制抽帧率随之下降——采集会话期间建议人工保持
+    /// 标记在视野内
+    private var currentLocalizeInterval: CFAbsoluteTime {
+        consecutiveNoMarkerFrames >= localizeIdleThreshold ? localizeIntervalIdle : localizeIntervalFull
+    }
+
     let session = AVCaptureSession()
     private let videoQueue = DispatchQueue(label: "aimphone.capture")
     private let ciContext = CIContext()
@@ -189,11 +210,101 @@ final class CameraStreamer: NSObject, ObservableObject {
         cameraAvailability = .available
     }
 
+    // MARK: 对焦锁定状态机（P0，focus-dial-plan.md；策略决策见 ADR-018）
+    /// 对焦阶段：focusing = continuousAutoFocus 收敛中；locked = 锁定 lensPosition
+    private enum FocusPhase { case focusing, locked }
+    /// 当前阶段；videoQueue 访问（configureSession 启动期的一次主线程写入除外，彼时采集未启动）
+    private var focusPhase: FocusPhase = .focusing
+    /// 硬件能力闸门（applyDeviceSettings 按当前设备刷新）：锁定需同时支持 .locked 对焦模式
+    /// 与自定义 lensPosition 锁定；任一不满足则静默降级为纯 continuousAutoFocus（模拟器/前摄同理）
+    private var focusLockSupported = false
+    /// 稳定判定：连续检出 ≥6/8 标记的起始时刻（nil = 当前不稳定）
+    private var focusGoodSince: CFAbsoluteTime?
+    /// 锁定时连续检出 <4 标记的识别次数（解锁触发计数）
+    private var focusBadCount = 0
+    /// 稳定判定时长：连续 1s 检出 ≥6 标记（满速档 15Hz ≈ 15 次识别）判定 AF 已收敛
+    private let focusStableDuration: CFAbsoluteTime = 1.0
+    /// 解锁触发门槛：锁定时连续 10 次识别检出 <4 标记（满速 ≈0.7s）判定画面恶化，
+    /// 覆盖遮挡/移远移近场景；瞬态遮挡（手指掠过 1–2 帧）不触发
+    private let focusUnlockThreshold = 10
+
+    /// 每次本机识别后喂入检出数（videoQueue 随 localizeFrame 调用）。
+    /// 稳定判定 → setFocusModeLocked 锁定；锁定中恶化 → 解锁回 continuousAutoFocus 重 AF。
+    /// NOTE: 稳定信号用标记检出数而非持续监听 KVO isAdjustingFocus——检出率直接反映
+    /// 画面可用性（失败链终点），isAdjustingFocus 只在锁定决策点瞬读作 AF 收敛佐证
+    private func focusFeed(markerCount: Int) {
+        guard let device = activeDevice else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        if markerCount >= 6 {
+            if focusGoodSince == nil { focusGoodSince = now }
+        } else {
+            focusGoodSince = nil
+        }
+        switch focusPhase {
+        case .focusing:
+            guard focusLockSupported,
+                  let since = focusGoodSince, now - since >= focusStableDuration,
+                  !device.isAdjustingFocus else { return }
+            // 锁当前 lensPosition：手机夹云台上、到屏距离物理固定，收敛后锁定消除
+            // 对比度 AF 对屏幕内容变化拉风箱产生的失焦帧（focus-dial-plan.md 失败链）
+            try? device.lockForConfiguration()
+            device.setFocusModeLocked(lensPosition: device.lensPosition) { _ in }
+            device.unlockForConfiguration()
+            focusPhase = .locked
+            focusBadCount = 0
+            print(String(format: "FOCUS 锁定 lensPosition=%.3f（连续 %.1fs 检出≥6）",
+                         device.lensPosition, now - since))
+        case .locked:
+            if markerCount < 4 {
+                focusBadCount += 1
+                if focusBadCount >= focusUnlockThreshold {
+                    unlockFocus(device, reason: "连续 \(focusBadCount) 次检出 <4")
+                }
+            } else {
+                focusBadCount = 0
+            }
+        }
+    }
+
+    /// 手动干预解锁入口：P1 轮盘对焦微调 / P1.5 点按对焦预留（本批次只留接口不接事件）。
+    /// 语义 = 解锁回 continuousAutoFocus，收敛后由 focusFeed 稳定判定自动重锁定
+    func requestRefocus() {
+        videoQueue.async { [weak self] in
+            guard let self, let device = self.activeDevice, self.focusPhase == .locked else { return }
+            self.unlockFocus(device, reason: "手动干预")
+        }
+    }
+
+    /// 解锁回 continuousAutoFocus（videoQueue）；复位稳定判定，等下一次收敛重锁定
+    private func unlockFocus(_ device: AVCaptureDevice, reason: String) {
+        try? device.lockForConfiguration()
+        if device.isFocusModeSupported(.continuousAutoFocus) {
+            device.focusMode = .continuousAutoFocus
+        }
+        device.unlockForConfiguration()
+        focusPhase = .focusing
+        focusGoodSince = nil
+        focusBadCount = 0
+        print("FOCUS 解锁重 AF：\(reason)")
+    }
+
     /// 对焦/白平衡/手动曝光统一配置：初始配置与云台翻转切换前后摄共用
     /// 手动曝光 1/120s（抑制屏幕条纹）+ 低 ISO（防止屏幕白底过曝）
+    /// 对焦区域钉帧中心（帧中心即瞄准点）+ 近距范围限制（云台到屏 20–80cm，缩短 AF 行程）
     private func applyDeviceSettings(_ device: AVCaptureDevice) {
+        // 前后摄切换走本函数即天然重置对焦状态机：新设备重新 CAF → 稳定 → 锁定（P0）
+        focusPhase = .focusing
+        focusGoodSince = nil
+        focusBadCount = 0
+        focusLockSupported = device.isFocusModeSupported(.locked)
+            && device.isLockingFocusWithCustomLensPositionSupported
         try? device.lockForConfiguration()
         device.focusMode = .continuousAutoFocus
+        // 不支持点对焦的设备（部分前摄）保持默认对焦区域
+        if device.isFocusPointOfInterestSupported {
+            device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
+        }
+        device.autoFocusRangeRestriction = .near
         if device.isExposureModeSupported(.custom) {
             let iso = min(device.activeFormat.minISO * 1.5, device.activeFormat.maxISO)
             device.setExposureModeCustom(duration: CMTime(value: 1, timescale: 120),
@@ -453,6 +564,14 @@ extension CameraStreamer {
         // 传采集 PTS 而非墙钟：滤波器 dt 精度直接影响 One Euro 消抖效果（Phase 1.3）
         let result = localizer.localize(bgra: base, width: w, height: h, bytesPerRow: bpr,
                                         timestamp: timestamp)
+        // 无检出降频档位切换（P1）：连续 0 检出满门槛进 300ms 降频档，任一帧检出即回满速
+        if result.markers.isEmpty {
+            consecutiveNoMarkerFrames += 1
+        } else {
+            consecutiveNoMarkerFrames = 0
+        }
+        // 对焦锁定状态机喂入（P0）：检出数驱动稳定判定/恶化解锁
+        focusFeed(markerCount: result.markers.count)
         let detectMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         DispatchQueue.main.async {
             self.localMarkerCount = result.markers.count
@@ -460,8 +579,9 @@ extension CameraStreamer {
         }
         let detectedIds = result.markers.map { $0.id }.sorted()
         let missingIds = (0...7).filter { !detectedIds.contains($0) }   // 标记全集 = id0–7（ADR-007）
-        // 每帧识别每帧上报（不抽稀，≈15Hz，ADR-009）：Mac 端白点覆盖层/debug 对照的流畅度
-        // 优先于控制信道流量（光标跟随走 Mac 侧视频帧识别，与本上报无关）
+        // 每次识别都上报（不抽稀，ADR-009；满速档 ≈15Hz，P1 降频档 3.3Hz）：
+        // Mac 端白点覆盖层/debug 对照的流畅度优先于控制信道流量
+        //（光标跟随走 Mac 侧视频帧识别，与本上报无关）
         if let aim = result.aim {
             print(String(format: "LOCALAIM screen=(%.1f, %.1f) markers=%d/%d detected=%@ q=%@ det=%.1fms",
                          aim.x, aim.y, result.markers.count, 8,
@@ -581,10 +701,10 @@ extension CameraStreamer: AVCaptureVideoDataOutputSampleBufferDelegate {
                        from connection: AVCaptureConnection) {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // 本机识别：≥10ms 间隔逐帧识别（alwaysDiscardsLateVideoFrames 保证队列不积压），
-        // 与推流/扫码互不阻塞（同队列顺序执行）
+        // 本机识别：两档间隔门控（满速 15Hz / 连续无检出降频 3.3Hz，见 currentLocalizeInterval），
+        // alwaysDiscardsLateVideoFrames 保证队列不积压，与推流/扫码互不阻塞（同队列顺序执行）
         let now0 = CFAbsoluteTimeGetCurrent()
-        if now0 - lastLocalizeTime >= 0.01 {
+        if now0 - lastLocalizeTime >= currentLocalizeInterval {
             lastLocalizeTime = now0
             localizeFrame(pb, timestamp: CMTimeGetSeconds(
                 CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))

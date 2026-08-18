@@ -2,6 +2,29 @@
 
 每条 = 决策 + 原因 + 推翻它之前要满足的条件。按时间倒序。
 
+## ADR-018 对焦收敛后锁定 lensPosition，恶化自动解锁重 AF（对焦 P0）
+
+- **决策**（2026-08-18，方案 focus-dial-plan.md §P0）：`CameraStreamer` 内联两态对焦
+  状态机（focusing/locked，videoQueue 串行）。启动与前后摄切换（`flipCamera` 走
+  `applyDeviceSettings` 天然重置）保持 `continuousAutoFocus`；本机识别连续 1s
+  检出 ≥6/8 标记且锁定决策点 `isAdjustingFocus == false` 时
+  `setFocusModeLocked(lensPosition:)` 锁当前位置；锁定中连续 10 次识别检出 <4 标记
+  （满速 ≈0.7s，覆盖遮挡/移远移近）自动解锁重 AF，收敛后按同一判定重锁定。
+  稳定信号选标记检出数为主、`isAdjustingFocus` 只瞬读不作持续 KVO 监听。
+  `applyDeviceSettings` 增补 `focusPointOfInterest = (0.5, 0.5)`（先查
+  `isFocusPointOfInterestSupported`）与 `autoFocusRangeRestriction = .near`。
+  能力前置检查 `isFocusModeSupported(.locked)` +
+  `isLockingFocusWithCustomLensPositionSupported`，任一不满足静默降级为纯 CAF
+  （模拟器/部分前摄路径不变）。`requestRefocus()` 预留手动干预解锁入口
+  （P1 轮盘微调 / P1.5 点按对焦用，本批次不接事件）。
+- **原因**：失败链 = 屏幕内容时刻变化 → 对比度 AF 拉风箱 → 失焦帧 → 丢标记
+  （README 20pt 中距失焦组命中率 72% 缺口的主要来源）；手机夹云台上、到屏距离
+  物理固定（20–80cm），AF 收敛后锁定是安全的，检出数直接反映画面可用性，
+  比单纯 isAdjustingFocus 更贴近"识别失败链终点"这一真实目标。
+- **推翻条件**：真机实测锁定后检出率/命中率不升反降（调阈值或回退纯 CAF）；
+  到屏距离固定前提不再成立（如手持模式）需重审锁定安全性；P2 refocus 协议
+  落地后若解锁路径分叉过多，状态机独立成 FocusController。
+
 ## ADR-017 时敏消息独立 TCP 通道：同端口双连接 + hello 角色声明
 
 - **决策**（2026-08-17）：执行 ADR-011 ④ 预留的推翻条款（单连接争用被实测证实）。
