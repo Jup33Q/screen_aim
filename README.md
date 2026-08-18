@@ -1,5 +1,10 @@
 # ScreenAim — Screen Sampling + ArUco Marker Detection (macOS)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Swift](https://img.shields.io/badge/Swift-6.x-orange.svg?logo=swift)](https://swift.org)
+[![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey.svg?logo=apple)](https://www.apple.com/macos/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-5.0-blue.svg)](https://opencv.org)
+
 A minimal viable prototype for the **phone-aiming screen-casting** scheme (Route B / Mac-side recognition):
 **ScreenCaptureKit frame capture → OpenCV ArUco marker detection → Homography mapping to screen coordinates**.
 
