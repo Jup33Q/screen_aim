@@ -1,5 +1,10 @@
 # 对焦优化代办 Plan — 轮盘调焦 + 自动对焦提升识别率
 
+> 进度总览（2026-08-18）：**P0 已完成并部署真机**（ADR-018，commit 822dc16）；
+> **数码变焦双输入（二指手势 + 轮盘）插队完成**（ADR-019，commit f8b8ae0，原 P1 轮盘
+> 目标的最终归宿）；**下一步 = P1.5 点按对焦**（激活提示词见 docs/focus-dial-activation-prompt.md）；
+> P1 轮盘对焦微调暂缓（轮盘已占用，要做需先解决输入通道）；P2 暂缓不动。
+
 背景结论（2026-08-17 调研）：
 
 - 轮盘唯一 DockKit 通道是 `.cameraZoom(factor:)`（绝对倍率，语义 App 自定）；当前接线 = 扳机按住 + 轮盘 → 亮度。
@@ -18,18 +23,22 @@
 - [x] `applyDeviceSettings` 增补：`focusPointOfInterest = (0.5, 0.5)`（帧中心即瞄准点，查 `isFocusPointOfInterestSupported`）、`autoFocusRangeRestriction = .near`（云台到屏 20–80cm）
 - [x] 前置检查：`isFocusModeSupported(.locked)` / `isLockingFocusWithCustomLensPositionSupported`，不支持时静默降级保持现状
 - [ ] **真机验证**：`--calibrate --serve` 会话对比 20pt 失焦组命中率（基线 72%）与瞄准点 σ；`tools/plot_localaim.py` 分析 `scenes/localaim_*.csv`
+  （2026-08-18：已部署 iPhone 15 Pro Max 并跑过 --calibrate --serve 会话，检出链路正常；正式 plot_localaim 命中率/σ 对照尚未跑）
 
 ## P1 — 轮盘手动对焦微调 + 对焦状态可见
 
 > 执行状态（2026-08-18）：轮盘目标已经用户确认为**数码变焦**而非对焦微调——
-> 变焦双输入（二指手势 + 轮盘）已实施（ADR-019），含跨 0.25× 刻度触觉与 >1× 倍率指示。
-> 下列对焦微调条目暂缓：`nudgeFocus` 未写，轮盘不加目标切换态；`requestRefocus()`
-> 解锁入口已在 P0 预留。
+> 变焦双输入（二指手势 + 轮盘）已实施（ADR-019）：1×–3×（≈3.1× 内欠采样不丢分辨率）、
+> 0.1× 刻度磁滞吸附 + 轻冲击触觉、>1× 倍率指示。下列对焦微调条目**暂缓**：
+> `nudgeFocus` 未写；轮盘已被变焦占用，要做微调需先解决输入通道（轮盘目标循环切换态
+> 或其他修饰组合）。`requestRefocus()` 解锁入口已在 P0 预留。
+> 另：轮盘原始 factor 的范围/增量粒度/松手是否回弹未实测（dockkit-button-mapping
+> references/flow2pro.md 实测矩阵待填）。
 
 - [ ] `CameraStreamer` 新增 `nudgeFocus(delta:)`：KVO 读当前 `lensPosition` 为基线，±步进微调（lensPosition 非线性且机型相关，禁止硬编码距离）
 - [x] 轮盘目标决策：~~扳机+轮盘从亮度换成对焦微调，或加"轮盘目标"循环切换态~~ → 已确认轮盘 = 数码变焦（ADR-019），亮度留太阳滑杆
 - [ ] `GimbalManager` 事件层不动，只改 ContentView 注入的闭包路由（变焦路由已按此落地）
-- [x] 视觉/触觉确认（变焦部分）：>1× 倍率指示 pill + 跨刻度 `UISelectionFeedbackGenerator`；对焦图标 + lensPosition 读数随对焦微调一起暂缓
+- [x] 视觉/触觉确认（变焦部分）：>1× 倍率指示 pill + 0.1× 刻度磁滞吸附 + `UIImpactFeedbackGenerator(.light)`；对焦图标 + lensPosition 读数随对焦微调一起暂缓
 - [ ] `isSmoothAutoFocusEnabled = true`（配合锁定策略，收敛慢的代价被覆盖）
 
 ## P1.5 — 点按对焦（原生相机语义，Liquid Glass 风格）
