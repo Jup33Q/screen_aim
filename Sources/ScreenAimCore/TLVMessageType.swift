@@ -10,7 +10,7 @@
 public enum TLVMessageType {
     public static let video = 0        // iPhone→Mac，JPEG 视频帧
     public static let control = 1      // 双向，控制 JSON（calib/pairingQR/mouse*/localAim/capture* 等）
-    // 2 预留：Coder(AimMessage) 信封枚举（P3 评估，ADR-011 之⑤）
+    public static let envelope = 2     // 双向，Codable AimMessage 信封（JSON，新结构化消息走这里）
     public static let captureMeta = 10 // iPhone→Mac，采集 session/end 记录（JSON）
     public static let captureFrame = 11// iPhone→Mac，采集帧：[4B jsonLen][json][PNG] 复合 payload
 }

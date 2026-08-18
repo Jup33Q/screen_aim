@@ -174,7 +174,20 @@ iPhone                                    Mac
 2. **iPhone 亚像素角点精化**（§1.3）。验收：1280w 帧中心 σ < 0.05pt（对齐 Mac 端水平）。
 3. **One Euro Filter** 加在 `ScreenLocalizer` 输出侧（两端同一实现放 `ScreenAimCore`）。验收：静止 σ 降 50%+，快速移动无可见滞后。
 
-### Phase 2 — Swift Vision 通道（2–3 天）
+### Phase 1.4 — 控制信道协议类型化：Codable enum（0.5 天，插入项，建议在 Phase 3 前完成）
+
+1. 现状：protocol.md §6/§7/§8/§10 的全部控制消息与采集记录都是 `[String: Any]` +
+   字符串 `type`/`kind`/`button` 手工解包，两端各维护一份魔法字符串（`CameraStreamer.sendControl/handleControl`、
+   `main.swift` 的 `server.onControl` switch、`CaptureServer.processRecord`），新增消息无编译期检查、
+   键名写错只能运行期发现。
+2. 改为 `Sources/ScreenAimCore/AimProtocol.swift` 双端共享的 Codable 定义
+   （ScreenAimCore 本就被 XcodeGen 直接编入 AimPhone，零接入成本）；
+   自定义编解码保证**线上 JSON 与 protocol.md 现有格式逐字节兼容**（只加不删原则不变）。
+3. 覆盖信号清单（闭集字符串 → enum）：控制帧 `type`（双向各一个消息枚举）、
+   鼠标 `button`、采集记录 `kind`、localaim CSV `src`、mouse CSV `event`、
+   Phase 2 预留 `DetectorKind`。详见 §7.9。
+4. 验收：全部消息 round-trip 自检 + protocol.md 内嵌示例 JSON 逐字段比对通过；
+   旧端互操作语义不变（未知 type 仍被忽略）。
 
 1. `ScreenAimCore` 新增 `VisionMarkerDetector`：DataMatrix × 8 标记，payload `aim:N`，`symbologies=[.dataMatrix]`；与 `ArucoDetector` 实现同一协议（`detect → [DetectedMarker]`），可在运行期切换/并行。
 2. Calibrator 增加 DataMatrix 标记渲染（CoreImage `CIDataMatrixCodeGenerator` 可生成；注意 macOS 生成器支持、静区手动留白 1 模块）。
@@ -293,7 +306,7 @@ iPhone                                    Mac
    双端可用）；静区 1 模块，现有白卡 pad 已覆盖；位图按 `backingScaleFactor` 生成（与 ArUco 路径一致）。
    `--make-markers` 加 `--kind datamatrix` 选项。
 4. **A/B 门槛**：同一场景各录 5 分钟 CSV，Vision 集齐率 ≥ ArUco 且中心 σ 不劣化 → 主通道切换，
-   写 ADR-008；不达标则 Vision 仅留作并行校验，ArUco 保持主通道。
+   写 ADR-012；不达标则 Vision 仅留作并行校验，ArUco 保持主通道。
 
 ### 7.6 Phase 2.2 · VNTrackObjectRequest 跟踪层
 
@@ -322,8 +335,70 @@ iPhone                                    Mac
 
 ### 7.8 文档同步清单（随代码同提交）
 
-- 新增决策：`docs/decisions.md` 追加 ADR-007（冗余标记 + RANSAC）、ADR-008（Vision 双通道结论）、
-  ADR-009（UDP 双通道）；推翻 ADR-001 时写清触发条件已满足。
-- `docs/protocol.md` §9（UDP）；`docs/architecture.md` 模块表加 VisionMarkerDetector / MarkerTracker / OneEuroFilter；
+- 新增决策：`docs/decisions.md` 追加 ADR-007（冗余标记 + RANSAC）、ADR-011（控制信道
+  Codable enum 类型化）、ADR-012（Vision 双通道结论）、ADR-013（UDP 双通道）；
+  推翻 ADR-001 时写清触发条件已满足。
+  （原计划的 ADR-008/009 编号已被 decisions.md 中鼠标/上报决策占用，顺延为 012/013。）
+- `docs/protocol.md` §9（UDP）；`docs/architecture.md` 模块表加 VisionMarkerDetector / MarkerTracker / OneEuroFilter / AimProtocol；
 - `docs/modules.md` 公开 API 索引更新；`docs/README.md` 文档地图加本方案；
 - 根 `README.md` 实测表更新（新命中率/σ/延迟数字，注明条件）。
+
+### 7.9 Phase 1.4 · 控制信道 Codable enum 类型化
+
+> 原则：**线上格式零变化**——只把两端内部的 `[String: Any]` + 魔法字符串换成强类型，
+> encode 出的 JSON 与 protocol.md 现有示例逐字段一致（只加不删、向后兼容原则不变）。
+
+**信号盘点（闭集字符串 → enum，代码锚点见括注）**：
+
+| 信号 | 闭集取值 | 现状锚点 |
+|---|---|---|
+| iPhone→Mac 控制帧 `type` | togglePairingQR / localAim / disconnect / mouseDown / mouseUp / mouseClick / mouseScroll | protocol §7/§8；`CameraStreamer.sendControl` 各调用点；`main.swift` `server.onControl` switch |
+| Mac→iPhone 控制帧 `type` | calib / pairingQR / captureStart / captureStop | protocol §6/§10；`CameraStreamer.handleControl`；`Calibrator`/`FrameServer.sendControl` 各调用点 |
+| 鼠标 `button` | left / right / middle / all（all 仅 mouseUp 兜底） | `main.swift postMouseCGTypes` 字符串 switch |
+| 采集回传 `kind` | session / frame / end | protocol §10；`CameraStreamer.sendCaptureRecords`；`CaptureServer.processRecord` |
+| localaim CSV `src` | tcp（Phase 3 起加 udp） | `Calibrator.logLocalAim` |
+| mouse CSV `event` | down / up / click / scroll | `Calibrator.logMouseEvent` |
+| 检测器种类（Phase 2 用） | aruco / vision / both | 方案 §7.5 `detectorKind`，本次只建类型不接逻辑 |
+
+**不改 enum 化的部分**：二维码配对 payload `{"host","port"}` 是开放结构体（可作 Codable struct，
+非 enum）；calib `markers` 键集随标记布局扩展，保持开放字典；视频帧二进制不动。
+
+**文件级改动**：
+
+| 文件 | 改动 |
+|---|---|
+| `Sources/ScreenAimCore/AimProtocol.swift`（新增，L0 文件头） | 见下方类型清单 |
+| `Sources/ScreenAim/main.swift` | `FrameServer.sendControl` 改收 `MacToPhoneMessage`；`server.onControl` 分发改解码 `PhoneToMacMessage` 后 switch 枚举；`CaptureServer.processRecord` 的 `kind` switch 换 `CaptureRecordKind`；`logLocalAim` 的 `src:` 参数换 `AimSource`；`logMouseEvent` 的 `event:` 换 `MouseEventKind`；`postMouse*` 的 button 字符串入参换 `MouseButton` |
+| `ios/AimPhone/CameraStreamer.swift` | `sendControl` 改收 `PhoneToMacMessage`；`sendMouseDown/Up/Click/Scroll`、`toggleMacPairingQR`、`localizeFrame` 上报、`disconnect` 全部改构造枚举；`handleControl` 改解码 `MacToPhoneMessage`；采集上传 session/end 记录的 `kind` 用 `CaptureRecordKind` |
+| `ios/AimPhone/CaptureRecorder.swift` | meta.jsonl 行内 `kind` 字段（如有）同源换枚举 rawValue |
+
+**`AimProtocol.swift` 类型清单**：
+
+1. `enum MouseButton: String, Codable { case left, right, middle, all }`
+2. `struct LocalAimReport: Codable`：`markers:Int / detected:[Int] / missing:[Int] / x:Double? / y:Double? / detectMs:Double`，CodingKeys 保线上键名 `detect_ms`
+3. `enum PhoneToMacMessage: Codable`：`togglePairingQR / localAim(LocalAimReport) / disconnect / mouseDown(MouseButton) / mouseUp(MouseButton) / mouseScroll(Int) / mouseClick(MouseButton)`（mouseClick 为旧协议保留）。
+   自定义 `encode(to:)`/`init(from:)`：`type` 字符串与 protocol §7/§8 逐字一致；
+   **未知 type 解码返回 nil 而非 throw**（保持"旧端忽略未知消息"的兼容语义，调用点 `if let` 即可）
+4. `enum MacToPhoneMessage: Codable`：`calib(screenW:Double, screenH:Double, markers:[String:[Double]]) / pairingQR(visible:Bool) / captureStart(seconds:Int, fps:Int, label:String) / captureStop`。
+   **WARNING 注释**：markers 必须保持 `{"0":[x,y],…}` JSON 对象形态——Foundation 的
+   `[Int:…]` 字典键会编成 JSON 数组，直接破坏 §6 线上格式；故键保 String 或写自定义编码
+5. `enum CaptureRecordKind: String, Codable { case session, frame, end }`
+6. `enum AimSource: String, Codable { case tcp, udp }`（udp 为 Phase 3 预留值）
+7. `enum MouseEventKind: String, Codable { case down, up, click, scroll }`
+8. `enum DetectorKind: String, Codable { case aruco, vision, both }`（Phase 2 用，仅建类型）
+
+**兼容陷阱（自检必须覆盖）**：
+- `JSONSerialization` → `JSONDecoder` 后 NSNumber 桥接消失：旧代码 `as? Int` 对 JSON `1.0`
+  能过，`Decoder` 的 `Int` 对 `1.0` 会失败——encode 侧保证整数键按 Int 编码
+- `mouseUp button:"all"` 的兜底语义、`mouseClick` 旧消息受理保持不变
+- iPhone 端 `sendMouseClick` 保留（旧协议路径），新 UI 不调用——现状不变
+
+**验收**：
+- `--self-test` 新增场景：全部消息 encode→decode round-trip；protocol.md §6/§7/§8/§10
+  内嵌示例 JSON 作为固定样本字符串 decode 成功且字段值全对；反向 encode 与样本逐字段一致
+  （key 顺序不计）
+- `swift build && swift run ScreenAim --self-test`；iOS 侧 `xcodegen generate && xcodebuild` 编译过
+- 真机冒烟一轮：配对 → calib 下发 → 鼠标三键 + 滚轮 → 采集 10 秒回传 → 主动断开，
+  两端日志与 CSV 列值与改动前一致
+- 新增 ADR-011（控制信道 Codable enum 类型化：决策 = 双端共享 AimProtocol.swift +
+  自定义编解码保线上格式；推翻条件 = 协议改二进制编码如 UDP 包后 JSON 信道退役）

@@ -20,9 +20,17 @@ import UIKit   // UIDevice（采集 session 记录系统版本）
 import ScreenAimCore
 #endif
 
+/// 采集回传限速目标（P1 Step 1，tlv-blocking-optimization-plan §2.1），单位 B/s。
+/// 依据：12MB/s ≈ 局域网 Wi-Fi 典型可用带宽（40~80MB/s 实测区间，802.11ax 近距离）
+/// 的 1/4～1/3——35–75MB/段的 PNG 回传若不限速会把单连接上的视频帧/控制消息压在
+/// 发送缓冲里（字节级队头阻塞）；留 2/3 余量给视频（15fps×~100KB ≈ 1.5MB/s）与控制。
+/// 只在 uploadCapture 回传循环内生效，不影响视频/控制正常路径；
+/// 真机验收门（plan §2.1）不达标则推翻本方案、退回 Step 2 独立连接
+private let captureUploadRate: Double = 12 * 1_000_000
+
 /// TLV 单连接传输（Mac 端 FrameServerV2 的客户端对偶）。
-/// type 0 视频帧 / type 1 控制 JSON（双向）/ type 10、11 采集上传，
-/// 消息边界与长度校验由框架托管；`try await send` 挂起即背压。
+/// type 0 视频帧 / type 1 控制 JSON（双向）/ type 2 Codable AimMessage 信封（双向）/
+/// type 10、11 采集上传，消息边界与长度校验由框架托管；`try await send` 挂起即背压。
 final class TLVTransport {
     /// 连接状态事件（主线程派发；文案与旧路径保持一致，UI 直接展示）
     enum Event {
@@ -35,8 +43,13 @@ final class TLVTransport {
     var onEvent: ((Event) -> Void)?
     /// Mac → iPhone 控制消息（type 1 原始 JSON 字节；主线程派发）
     var onControl: ((Data) -> Void)?
+    /// Mac → iPhone 结构化消息（TLV type 2 Codable 信封 AimMessage，protocol.md §11；
+    /// 主线程派发；解码失败的消息忽略，不破坏连接）
+    var onMessage: ((AimMessage) -> Void)?
 
     private(set) var isConnected = false
+    /// 最近一次连接目标（fast 时敏通道在主连接就绪后复用同一端点开第二连接，ADR-017）
+    private(set) var lastEndpoint: (endpoint: NWEndpoint, label: String)?
 
     private var connection: NetworkConnection<TLV>?
     private var readTask: Task<Void, Never>?
@@ -50,6 +63,7 @@ final class TLVTransport {
 
     func connect(endpoint: NWEndpoint, label: String) {
         retryCount = 0
+        lastEndpoint = (endpoint, label)
         startConnection(endpoint: endpoint, label: label)
     }
 
@@ -75,15 +89,23 @@ final class TLVTransport {
             }
         }
 
-        // 接收循环：Mac 下行只有 type 1 控制消息；流终结即连接断开
+        // 接收循环：Mac 下行为 type 1 控制 JSON + type 2 Codable 信封；流终结即连接断开
         readTask = Task { [weak self, conn] in
             var endedNormally = false
             do {
                 for try await message in conn.messages {
-                    if message.metadata.type == TLVMessageType.control {
+                    switch message.metadata.type {
+                    case TLVMessageType.control:
                         DispatchQueue.main.async { self?.onControl?(message.content) }
+                    case TLVMessageType.envelope:
+                        // 解码失败即忽略（向后兼容：新版 Mac 新增的 case 不应使旧手机断连）
+                        if let msg = try? JSONDecoder().decode(
+                            AimMessage.self, from: message.content) {
+                            DispatchQueue.main.async { self?.onMessage?(msg) }
+                        }
+                    default:
+                        break   // 未知 type 忽略（向后兼容：新版 Mac 新增的 type 不应使旧手机断连）
                     }
-                    // 未知 type 忽略（向后兼容：新版 Mac 新增的 type 不应使旧手机断连）
                 }
                 endedNormally = true
             } catch {
@@ -175,6 +197,13 @@ final class TLVTransport {
         isConnected = false
     }
 
+    /// 静默断开（不发 mouseUp/disconnect 兜底帧）：fast 时敏通道专用（ADR-017），
+    /// 断开兜底语义只属于主连接
+    func close() {
+        generation += 1   // 断开后的迟到回调全部失效
+        teardownConnection()
+    }
+
     /// 主动断开：先补发 mouseUp all + disconnect 兜底帧（protocol.md §7/§8，ADR-008），
     /// 以 lastMessage 收尾保证通知帧先于 FIN 到达（等价旧路径 finalMessage 语义）。
     /// NOTE: readTask 取消即连接取消——须等兜底帧发完再取消，故拆出独立收尾 Task
@@ -262,6 +291,11 @@ final class TLVTransport {
                     payload.append(json)
                     payload.append(png)
                     try await conn.send(payload, type: TLVMessageType.captureFrame)
+                    // P1 Step 1 pacing：yield 给视频帧/控制消息插队窗口；按字节折算
+                    // 限速睡眠，把回传压到 captureUploadRate（只在此循环内生效）
+                    await Task.yield()
+                    try? await Task.sleep(nanoseconds: UInt64(
+                        Double(payload.count) / captureUploadRate * 1e9))
                 }
                 let end: [String: Any] = ["kind": "end", "frames": total,
                                           "peakRotRate": peakRotRate]

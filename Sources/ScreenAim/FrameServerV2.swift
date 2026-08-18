@@ -16,7 +16,8 @@ import ScreenAimCore
 
 // MARK: - 采集落盘（protocol.md §11）
 /// 采集会话落盘器（type 10/11 路径，P3 起唯一存续；与已拆除的旧 CaptureServer 同源逻辑）。
-/// 线程约束：实例由单个连接子任务独占使用，无跨连接共享；onCaptureDone 派主线程。
+/// 线程约束：实例由单个连接的采集消费 Task 独占使用（P0 起落盘经 CapturePipeline
+/// 移出接收循环），无跨连接共享；onCaptureDone 派主线程。
 final class CaptureIngestor {
     /// 当前采集会话的 Mac 侧元信息（label/标记参数/映射表，写 session.json 用）
     var sessionInfo: (() -> [String: Any])?
@@ -90,20 +91,86 @@ final class CaptureIngestor {
     }
 }
 
+// MARK: - 采集落盘管道（P0：落盘移出接收循环，tlv-blocking-optimization-plan §1）
+/// 采集记录的有界管道：接收循环只入队路由，PNG 写盘在独立消费 Task 串行执行。
+///
+/// 背压语义：深度 ≥ 容量时 `enqueue` 挂起（CheckedContinuation 排队），接收循环随之
+/// 停读，TCP 窗口自然反压回手机端（手机上传本就是串行 `try await send`，背压链路闭环）。
+/// `close()` 唤醒全部挂起的入队者（其元素丢弃），消费者排空已入队元素后退出。
+///
+/// NOTE: AsyncStream 无内建有界语义，这里用 unbounded AsyncStream 做消费端迭代 +
+/// 手动深度计数 + 等待者队列拼出有界管道；等价的纯 continuation 环形缓冲代码更长
+private actor CapturePipeline {
+    /// 元素与 CaptureIngestor.process 入参对齐：session/end 记录 bin 为空
+    typealias Item = (obj: [String: Any], bin: Data)
+
+    /// 容量 8 条：单条最大 ≈1MB JSON + PNG 数 MB，峰值内存可控在 ~50MB 内
+    private let capacity = 8
+    private var depth = 0
+    private var closed = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private let continuation: AsyncStream<Item>.Continuation
+    /// 消费端迭代序列（单消费者：串行落盘天然保 session/frame/end 顺序）
+    let stream: AsyncStream<Item>
+
+    init() {
+        var cont: AsyncStream<Item>.Continuation!
+        stream = AsyncStream { cont = $0 }
+        continuation = cont
+    }
+
+    /// 入队一条采集记录；管道满时挂起（挂起即背压，禁止无界缓冲）。close 后调用直接丢弃
+    func enqueue(_ item: Item) async {
+        while depth >= capacity, !closed {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { waiters.append($0) }
+            } onCancel: {
+                // NOTE: 挂起在 withCheckedContinuation 的任务被取消时不会自动唤醒，
+                // 取消路径必须触发 close 排空等待者，否则 continuation 泄漏
+                Task { await self.close() }
+            }
+        }
+        guard !closed else { return }
+        depth += 1
+        continuation.yield(item)
+    }
+
+    /// 连接终结时调用：唤醒全部挂起的入队者（元素丢弃），消费者排空剩余元素后退出
+    func close() {
+        closed = true
+        for w in waiters { w.resume() }
+        waiters.removeAll()
+        continuation.finish()
+    }
+
+    /// 消费端每取走一条调用一次：释放一个深度名额并唤醒一个挂起的入队者
+    func didDequeue() {
+        depth -= 1
+        if !waiters.isEmpty {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 // MARK: - TLV 帧服务
 /// TLV 单连接帧服务（9100 端口，Bonjour `_aimphone._tcp`）。
 /// 连接建立即下发标定映射表（type 1），随后 `messages` 异步序列按 type 分发：
-/// 0 视频帧 → onFrame；1 控制 JSON → onControl；10/11 采集记录 → CaptureIngestor。
+/// 0 视频帧 → onFrame；1 控制 JSON → onControl；10/11 采集记录 → CapturePipeline
+/// 有界管道 → 消费 Task 串行落盘（P0，CaptureIngestor）。
 /// `try await send` 的挂起即背压（框架托管流控），15fps 视频天然节流。
 final class FrameServerV2 {
     let port: UInt16
     let onFrame: (Data) -> Void
-    var onConnect: (() -> Void)?      // 手机连上时回调（主线程派发，用于隐藏配对二维码）
+    /// 首条连接建立时回调（主线程派发，用于隐藏配对二维码；ADR-017 双连接下按计数门控，
+    /// fast 通道的第二条连接不重复触发）
+    var onConnect: (() -> Void)?
     /// 新连接建立后立刻下发一次的控制消息（标定映射表，protocol.md §6/§11）；nil 则不发
     var handshakePayload: (() -> Data?)?
-    /// 手机端控制消息回调（type 1 JSON），参数为 JSON 对象；连接子任务上下文
-    var onControl: (([String: Any]) -> Void)?
-    /// 连接断开回调（主动/被动都会触发，主线程派发；§8 鼠标按键卡死兜底用）
+    /// 手机端控制消息回调（type 1 JSON），参数为 JSON 对象 + 是否来自 fast 时敏通道
+    ///（ADR-017，CSV src 记 tlv-fast 用）；连接子任务上下文。hello 角色声明在内部吞掉
+    var onControl: (([String: Any], Bool) -> Void)?
+    /// 全部连接断开时回调（主动/被动都会触发，主线程派发；§8 鼠标按键卡死兜底用；
+    /// ADR-017 双连接下单条掉线不触发）
     var onDisconnect: (() -> Void)?
     /// 监听器失败回调（主线程）。NOTE: 同旧 FrameServer——绑定失败是异步上报的，
     /// 不处理会留下永远配不对的"僵尸二维码"
@@ -115,6 +182,8 @@ final class FrameServerV2 {
     /// 存活连接表（sendControl 广播用）。NSLock 保护：注册/注销在连接子任务，
     /// 广播在主线程（UI 事件路径）
     private var activeConns: [NetworkConnection<TLV>] = []
+    /// fast 时敏通道连接子集（ADR-017）：hello role=fast 声明后在 dispatch 标记
+    private var fastConns: [NetworkConnection<TLV>] = []
     private let connsLock = NSLock()
     private var listenerTask: Task<Void, Never>?
 
@@ -172,33 +241,80 @@ final class FrameServerV2 {
         }
     }
 
+    /// 向所有存活连接广播结构化消息（Mac → iPhone，TLV type 2 Codable 信封，protocol.md §11）。
+    /// 语义同 sendControl（sendIdempotent，可丢弃的瞬态信号不排队积压）
+    func send(_ message: AimMessage) {
+        guard let data = try? JSONEncoder().encode(message) else { return }
+        connsLock.lock()
+        let conns = activeConns
+        connsLock.unlock()
+        for conn in conns {
+            conn.sendIdempotent(data, type: TLVMessageType.envelope)
+        }
+    }
+
     // MARK: 连接生命周期
 
-    private func register(_ conn: NetworkConnection<TLV>) {
+    /// 注册连接，返回注册后的存活数（首连门控 onConnect 用，ADR-017 双连接）
+    @discardableResult
+    private func register(_ conn: NetworkConnection<TLV>) -> Int {
         connsLock.lock()
         activeConns.append(conn)
+        let n = activeConns.count
+        connsLock.unlock()
+        return n
+    }
+
+    /// 注销连接，返回注销后的存活数（全断门控 onDisconnect 用，ADR-017 双连接）
+    @discardableResult
+    private func unregister(_ conn: NetworkConnection<TLV>) -> Int {
+        connsLock.lock()
+        activeConns.removeAll { $0 == conn }
+        fastConns.removeAll { $0 == conn }
+        let n = activeConns.count
+        connsLock.unlock()
+        return n
+    }
+
+    /// 标记/查询 fast 时敏通道（hello role=fast 声明后生效，ADR-017）
+    private func markFast(_ conn: NetworkConnection<TLV>) {
+        connsLock.lock()
+        if !fastConns.contains(where: { $0 == conn }) { fastConns.append(conn) }
         connsLock.unlock()
     }
 
-    private func unregister(_ conn: NetworkConnection<TLV>) {
+    private func isFast(_ conn: NetworkConnection<TLV>) -> Bool {
         connsLock.lock()
-        activeConns.removeAll { $0 == conn }
-        connsLock.unlock()
+        defer { connsLock.unlock() }
+        return fastConns.contains { $0 == conn }
     }
 
     /// 单连接服务循环（listener.run 的子任务上下文；Task 取消即连接取消）
     private func handleConnection(_ conn: NetworkConnection<TLV>) async {
         print("手机已连接（TLV）: \(conn.remoteEndpoint?.debugDescription ?? "?")")
-        register(conn)
-        DispatchQueue.main.async { self.onConnect?() }
+        // ADR-017 双连接计数门控：首连才报 onConnect（隐藏 QR），全断才报 onDisconnect
+        //（fast 通道的第二连接建立/断开不触发手机级状态翻转）
+        if register(conn) == 1 {
+            DispatchQueue.main.async { self.onConnect?() }
+        }
         // 每连接独立采集落盘器：录制→停止→回传时序与视频流共用连接（ADR-011 ④）
         let ingestor = CaptureIngestor()
         ingestor.sessionInfo = sessionInfo
         ingestor.onCaptureDone = onCaptureDone
+        // P0：落盘移出接收循环。接收循环只做分帧路由入队，PNG 写盘在消费 Task 串行执行
+        //（此前 bin.write(to:) 内联在接收循环里，写盘期间整个循环停摆，视频帧/控制消息
+        // 被磁盘 I/O 卡住）。消费 Task 独占 ingestor，串行消费天然保 session/frame/end 顺序
+        let pipe = CapturePipeline()
+        let consumer = Task {
+            for await item in pipe.stream {
+                ingestor.process(item.obj, bin: item.bin)
+                await pipe.didDequeue()
+            }
+        }
         defer {
-            unregister(conn)
-            ingestor.finish()   // 中途断连按已收帧数兜底收尾
-            DispatchQueue.main.async { self.onDisconnect?() }
+            if unregister(conn) == 0 {
+                DispatchQueue.main.async { self.onDisconnect?() }
+            }
         }
         // 控制信道：连接建立即下发标定映射表（type 1）
         if let data = handshakePayload?() {
@@ -207,26 +323,43 @@ final class FrameServerV2 {
         }
         do {
             for try await message in conn.messages {
-                dispatch(message.content, type: message.metadata.type, ingestor: ingestor)
+                await dispatch(message.content, type: message.metadata.type, conn: conn, pipe: pipe)
             }
         } catch {
             // 断开/取消时 messages 抛错终结，属正常收尾路径
         }
+        // 收尾顺序（P0）：close 排空管道并唤醒全部挂起的入队者 → 等消费 Task 退出 →
+        // 兜底 finish（中途断连按已落盘帧数收尾，语义同改造前）
+        await pipe.close()
+        _ = await consumer.value
+        ingestor.finish()
     }
 
-    /// TLV type 路由：未知 type 忽略（向后兼容：新版手机新增的 type 不应使旧 Mac 断连）
-    private func dispatch(_ data: Data, type: Int, ingestor: CaptureIngestor) {
+    /// TLV type 路由：未知 type 忽略（向后兼容：新版手机新增的 type 不应使旧 Mac 断连）。
+    /// 视频/控制内联分发（小消息无重活）；采集 type 10/11 必须同走一条管道——
+    /// 分开走会乱序（end 可能先于 frame 落盘），顺序由管道的串行消费者保证
+    private func dispatch(_ data: Data, type: Int, conn: NetworkConnection<TLV>,
+                          pipe: CapturePipeline) async {
         switch type {
         case TLVMessageType.video:
             onFrame(data)
         case TLVMessageType.control:
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                onControl?(obj)
+                // fast 时敏通道角色声明（ADR-017，protocol.md §11）：标记连接后吞掉，
+                // 不转发业务层；未知 role 的 hello 同样吞掉（预留扩展）
+                if obj["type"] as? String == "hello" {
+                    if obj["role"] as? String == "fast" {
+                        markFast(conn)
+                        print("fast 时敏通道已建立: \(conn.remoteEndpoint?.debugDescription ?? "?")")
+                    }
+                    return
+                }
+                onControl?(obj, isFast(conn))
             }
         case TLVMessageType.captureMeta:
             // session/end 记录（纯 JSON，无二进制体）
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                ingestor.process(obj, bin: Data())
+                await pipe.enqueue((obj, Data()))
             }
         case TLVMessageType.captureFrame:
             // 复合 payload：[4B 大端 jsonLen][json][PNG]（协议 §11）
@@ -236,7 +369,7 @@ final class FrameServerV2 {
                   let obj = try? JSONSerialization.jsonObject(
                     with: data.subdata(in: 4..<(4 + jsonLen))) as? [String: Any]
             else { return }
-            ingestor.process(obj, bin: data.subdata(in: (4 + jsonLen)..<data.count))
+            await pipe.enqueue((obj, data.subdata(in: (4 + jsonLen)..<data.count)))
         default:
             break
         }

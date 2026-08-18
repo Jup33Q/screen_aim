@@ -3,7 +3,7 @@
 //  ScreenAimCore — 纯 Swift ArUco（DICT_4X4_50）标记检测器，零第三方依赖
 //
 //  管线：BGRA → 灰度 → 自适应阈值（积分图均值-C）→ 黑色连通域（two-pass union-find）
-//        → 四边形候选（组件在 ±45° 方向的极值点即凸四边形四角）
+//        → 候选预筛（±45° 极值点得凸四边形 + 几何过滤 + 边缘内暗外亮对比指纹）
 //        → 亚像素角点精化（法向剖面 + TLS 直线拟合，Phase 1.2）
 //        → 单应矫正采样 6×6 格 → 排序最大间隙阈值 → 边框环校验 + 字典 4 旋转匹配
 //
@@ -38,9 +38,12 @@ public final class ArucoDetector {
     public var outerRingMargin: Double = 10  // 外圈亮度必须超过格网阈值这么多
     public var minCellGap: Double = 25    // 36 格最小黑白间隙（模糊帧上白格可能只剩 ~180）
     public var subpixelRefine = true      // 亚像素角点精化开关（Phase 1.2；--replay A/B 用）
-    // 候选解码上限：按组件像素数降序截断。8 个真实标记通常是最干净的暗块，
-    // 复杂场景（桌面文字/图标噪点成百上千）只解前 N 个，长尾直接丢弃；
-    // decode 内部的边框环/外圈/字典校验会把混入的伪候选筛掉
+    // 解码候选上限：decode（亚像素精化 + 单应采样）在 debug 构建下约 0.5–2ms/候选，
+    // 无标记的复杂夜景里 prefilter 幸存者可达成百上千，必须硬性封顶否则单帧 >500ms
+    // （2026-08-17 真机实测 256 上限 = 无标记场景 553ms/帧、上报掉到 1.8Hz）。
+    // 截断按 prefilter 的边缘对比强度降序（而非组件像素数）——真实标记"内暗外亮"
+    // 四边皆强，稳居前排；WARNING: 不能按组件大小截断，深色桌面大型暗块会把标记挤出
+    // 前 N（19cb625 引入 maxCandidates 后的回归：真机全帧 0 检出）
     public var maxCandidates = 32
     public var debugLog = false           // 打印候选拒绝原因（排错用）
     /// 拒绝原因直方图（--replay 汇总用；每次拒绝一次字典递增，成本可忽略）
@@ -85,14 +88,21 @@ public final class ArucoDetector {
         thresholdDark(w: w, h: h)
         if debugLog { lastDark = dark; lastSize = (w, h) }
         let comps = labelComponents(w: w, h: h)
-        // 候选数量上限（maxCandidates）：按像素数降序取前 N 个再逐个解码，
-        // 防止复杂桌面场景下成千上万个噪点组件拖垮逐候选 decode
-        let capped = comps.count > maxCandidates
-            ? Array(comps.sorted { $0.count > $1.count }.prefix(maxCandidates))
-            : comps
+        // 先对全部组件跑廉价预筛（几何 + 边缘对比），幸存者按对比强度降序截断
+        // （maxCandidates）再做昂贵解码（亚像素精化 + 单应采样）。
+        // 排序键用 prefilter 实测的四边最弱对比：真实标记白卡环四边皆亮，强度 >> 噪块；
+        // 大暗块在 prefilter 已死于对比指纹（见 prefilter 注释），对比强度兜底排序即可
+        var pre: [(Component, [CGPoint], Double)] = []
+        for c in comps {
+            if let r = prefilter(candidate: c, w: w, h: h) { pre.append((c, r.pts, r.contrast)) }
+        }
+        let capped = pre.count > maxCandidates
+            ? Array(pre.sorted { $0.2 != $1.2 ? $0.2 > $1.2 : $0.0.count > $1.0.count }
+                        .prefix(maxCandidates))
+            : pre
         var out: [DetectedMarker] = []
-        for c in capped {
-            if let m = decode(candidate: c, w: w, h: h) { out.append(m) }
+        for (c, pts, _) in capped {
+            if let m = decode(candidate: c, corners: pts, w: w, h: h) { out.append(m) }
         }
         return out.sorted { $0.id < $1.id }
     }
@@ -275,8 +285,13 @@ public final class ArucoDetector {
         return comps
     }
 
-    // MARK: - 5/6/7. 候选过滤 → 四边形排序 → 位图解码
-    private func decode(candidate c: Component, w: Int, h: Int) -> DetectedMarker? {
+    // MARK: - 5/6. 候选预筛（廉价：几何 + 边缘对比，不做像素采样级解码）
+    /// 通过则返回排序后的四顶点（最接近左上角起，视觉顺时针，供 decode 直接使用）
+    /// 与四边最弱对比度（外侧-内侧灰度差的最小值，供 decode 候选排序：值越大越像真标记）。
+    /// 对比预检：每边中点沿外法向内外各采一点，真实标记"内暗（边框环）外亮（白卡）"，
+    /// 深色桌面上的实心暗块内外皆暗，在此被拦下——这是 maxCandidates 截断前
+    /// 区分标记与桌面暗背景噪块的关键指纹（成本：每候选 8 次双线性采样）
+    private func prefilter(candidate c: Component, w: Int, h: Int) -> (pts: [CGPoint], contrast: Double)? {
         dlogPrefix = " @(\(Int((c.minSum.x + c.maxSum.x) / 2)),\(Int((c.minSum.y + c.maxSum.y) / 2))) n=\(c.count)"
         let big = c.count >= 100
         if debugLog && big {
@@ -284,7 +299,7 @@ public final class ArucoDetector {
         }
         if c.touchesBorder {
             dlog("touchesBorder count=\(c.count) bbox=(\(Int(c.minDiff.x)),\(Int(c.minSum.y)))-(\(Int(c.maxDiff.x)),\(Int(c.maxSum.y)))")
-            return reject("touchesBorder")
+            _ = reject("touchesBorder"); return nil
         }
 
         // 极值点 → 四顶点（凸四边形的 ±45° 方向极值即四个角）
@@ -294,7 +309,7 @@ public final class ArucoDetector {
         for p in pts where !uniq.contains(where: { abs($0.x - p.x) + abs($0.y - p.y) < 1 }) {
             uniq.append(p)
         }
-        guard uniq.count == 4 else { if big { dlog("corners=\(uniq.count)") }; return reject("corners") }
+        guard uniq.count == 4 else { if big { dlog("corners=\(uniq.count)") }; _ = reject("corners"); return nil }
         pts = uniq
 
         // 绕质心按 atan2 排序（图像 y 向下时等同于视觉顺时针），再从最接近左上角者开始
@@ -310,9 +325,9 @@ public final class ArucoDetector {
         for i in 0..<4 {
             let a = pts[i], b = pts[(i + 1) % 4], d = pts[(i + 2) % 4]
             let cross = (b.x - a.x) * (d.y - b.y) - (b.y - a.y) * (d.x - b.x)
-            if abs(cross) < 1 { if big { dlog("degenerate cross=\(cross)") }; return reject("degenerate") }
+            if abs(cross) < 1 { if big { dlog("degenerate cross=\(cross)") }; _ = reject("degenerate"); return nil }
             let sign = cross > 0 ? 1 : -1
-            if crossSign == 0 { crossSign = sign } else if sign != crossSign { if big { dlog("concave") }; return reject("concave") }
+            if crossSign == 0 { crossSign = sign } else if sign != crossSign { if big { dlog("concave") }; _ = reject("concave"); return nil }
         }
 
         // 边长与面积过滤
@@ -320,16 +335,42 @@ public final class ArucoDetector {
         for i in 0..<4 {
             sides.append(hypot(pts[(i + 1) % 4].x - pts[i].x, pts[(i + 1) % 4].y - pts[i].y))
         }
-        guard sides.allSatisfy({ $0 >= minSide }) else { return reject("minSide") }   // 小噪声太多，不记录
+        guard sides.allSatisfy({ $0 >= minSide }) else { _ = reject("minSide"); return nil }   // 小噪声太多，不记录
         let quadArea = 0.5 * abs(
             (pts[0].x * pts[1].y + pts[1].x * pts[2].y + pts[2].x * pts[3].y + pts[3].x * pts[0].y)
           - (pts[1].x * pts[0].y + pts[2].x * pts[1].y + pts[3].x * pts[2].y + pts[0].x * pts[3].y))
-        guard quadArea <= Double(w * h) * maxQuadAreaRatio else { dlog("quadArea=\(Int(quadArea)) too big"); return reject("quadArea") }
+        guard quadArea <= Double(w * h) * maxQuadAreaRatio else { dlog("quadArea=\(Int(quadArea)) too big"); _ = reject("quadArea"); return nil }
         let fill = Double(c.count) / quadArea
         guard fill >= minFillRatio && fill <= maxFillRatio else {
-            dlog("fill=\(String(format: "%.2f", fill)) count=\(c.count) quadArea=\(Int(quadArea))"); return reject("fill")
+            dlog("fill=\(String(format: "%.2f", fill)) count=\(c.count) quadArea=\(Int(quadArea))"); _ = reject("fill"); return nil
         }
 
+        // 边缘对比预检：边中点内侧（标记边框环，暗）vs 外侧（白卡，亮）。
+        // 偏移取边长 8%（钳到 [2, 8]px）：小于白卡 pad（≈边长 17%），不会采到卡外背景
+        let centroid = CGPoint(x: cx, y: cy)
+        var minContrast = Double.greatestFiniteMagnitude
+        for i in 0..<4 {
+            let a = pts[i], b = pts[(i + 1) % 4]
+            let len = sides[i]
+            // 外法向：边的垂直方向中取背离质心的一侧
+            var nx = -(b.y - a.y) / len, ny = (b.x - a.x) / len
+            let mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
+            if nx * (mx - centroid.x) + ny * (my - centroid.y) < 0 { nx = -nx; ny = -ny }
+            let k = min(8, max(2, len * 0.08))
+            let inside = sampleGray(x: mx - nx * k, y: my - ny * k, w: w, h: h)
+            let outside = sampleGray(x: mx + nx * k, y: my + ny * k, w: w, h: h)
+            guard outside > inside + 15 else {
+                if big { dlog("contrast in=\(Int(inside)) out=\(Int(outside))") }
+                _ = reject("contrast"); return nil
+            }
+            minContrast = min(minContrast, outside - inside)
+        }
+        return (pts, minContrast)
+    }
+
+    // MARK: - 7. 位图解码（昂贵：亚像素精化 + 单应采样，仅对预筛通过的候选执行）
+    private func decode(candidate c: Component, corners pts0: [CGPoint], w: Int, h: Int) -> DetectedMarker? {
+        var pts = pts0
         // 亚像素角点精化（Phase 1.2）：法向剖面 + TLS 直线拟合。
         // NOTE: 极值角点来自暗组件像素中心，系统性偏内 ~0.5px，精化同时修正该偏移；
         // 小标记（帧上 <20px）角点偏 1px 就会把 6×6 格采样压到边框环上导致解码失败，

@@ -9,7 +9,6 @@
 import Foundation
 import AVFoundation
 import CoreImage
-import CoreMotion
 import UIKit
 
 /// 单帧元数据（meta.jsonl 一行 + 对应一个 PNG）。字段全部可选容错——回放端按 key 取值
@@ -39,7 +38,9 @@ struct CaptureFrameMeta {
 }
 
 /// 采集录制器：start 后到点自动 finish；PNG 与 meta.jsonl 写临时目录，上传由调用方负责。
-/// NOTE: PNG 编码（720p ≈ 30–60ms/帧）在 videoQueue 上同步执行，5fps 抽帧下不影响采集链路
+/// NOTE: PNG 编码（720p ≈ 30–60ms/帧）在 videoQueue 上同步执行，5fps 抽帧下不影响采集链路。
+/// meta.jsonl 每帧延迟一帧写出（pendingMeta）：为 WP-I1 的 motion 字段补齐帧 PTS
+/// 前后各 0.15s 的 100Hz 运动样本；字段只加不删，旧回放/分析工具不受影响
 final class CaptureRecorder {
     private(set) var isRecording = false
     private(set) var frameCount = 0
@@ -50,8 +51,15 @@ final class CaptureRecorder {
     private var frameInterval: CFAbsoluteTime = 0.2   // 1/fps
     private var lastRecordPts: CFAbsoluteTime = 0
     private let ciContext = CIContext()
-    private let motion = CMMotionManager()
+    /// IMU 采样器（WP-I1，docs/imu-fusion-plan.md §1）：跟随录制启停，100Hz deviceMotion。
+    /// NOTE: 全 app 只此一处持有 CMMotionManager（经 MotionSampler），多实例 start/stop
+    /// 语义互相干扰；原"每帧轮询角速度模长"改由 MotionSampler 最新样本供给，语义不变
+    private let motionSampler = MotionSampler()
     private var deviceProvider: (() -> AVCaptureDevice?)?
+
+    /// 待写出的上一帧 meta（jsonDict + 该帧 PTS）。meta 延迟一帧写出：本帧到达时
+    /// 上一帧 PTS「之后」半窗的 100Hz 运动样本已到齐，motion 字段才能覆盖 PTS 前后
+    private var pendingMeta: (dict: [String: Any], pts: CFAbsoluteTime)?
 
     /// 本次录制内的角速度峰值（上传摘要用）
     private(set) var peakRotRate = 0.0
@@ -95,7 +103,7 @@ final class CaptureRecorder {
         lastRecordPts = 0
         startTime = CFAbsoluteTimeGetCurrent()
         isRecording = true
-        if motion.isDeviceMotionAvailable { motion.startDeviceMotionUpdates() }
+        motionSampler.start()
         return nil
     }
 
@@ -118,6 +126,8 @@ final class CaptureRecorder {
             if let out = finish() { onAutoFinish(out.0, out.1) }
             return
         }
+        // 冲刷上一帧 meta（在节流判断之前：被节流跳过的帧同样带来运动样本的推进）
+        flushPendingMeta()
         guard pts - lastRecordPts >= frameInterval else { return }
         lastRecordPts = pts
         guard let dir else { return }
@@ -132,9 +142,7 @@ final class CaptureRecorder {
         try? png.write(to: dir.appendingPathComponent("frames/\(name)"))
 
         let device = deviceProvider?()
-        let rot = motion.deviceMotion.map {
-            hypot($0.rotationRate.x, hypot($0.rotationRate.y, $0.rotationRate.z))
-        } ?? 0
+        let rot = motionSampler.latestRotRate()
         peakRotRate = max(peakRotRate, rot)
         let meta = CaptureFrameMeta(
             seq: frameCount, pts: pts,
@@ -143,7 +151,29 @@ final class CaptureRecorder {
             zoom: device.map { Double($0.videoZoomFactor) } ?? 1,
             rotationRate: rot,
             markers: result.markers, aim: result.aim, detectMs: detectMs)
-        if let line = try? JSONSerialization.data(withJSONObject: meta.jsonDict()) {
+        // meta 不立即写盘：挂起一帧，待下一帧到达时补 motion 字段再写出（见 pendingMeta）
+        pendingMeta = (meta.jsonDict(), pts)
+    }
+
+    /// 补 motion 字段并写出挂起的上一帧 meta（只加不删：旧分析工具对未知字段免疫）。
+    /// motion.samples 每行 = [dt, wx, wy, wz, qx, qy, qz, qw]，dt 为相对帧 PTS 的秒；
+    /// 四舍五入仅控体积（0.1ms / 1e-5 rad/s 精度对 100Hz 分析无影响）
+    private func flushPendingMeta() {
+        guard let pending = pendingMeta else { return }
+        pendingMeta = nil
+        var dict = pending.dict
+        let half = MotionSampler.windowHalf
+        let samples = motionSampler.window(around: pending.pts, half: half).map { s in
+            [(s.t - pending.pts).rounded(toPlaces: 4),
+             s.wx.rounded(toPlaces: 5), s.wy.rounded(toPlaces: 5), s.wz.rounded(toPlaces: 5),
+             s.qx.rounded(toPlaces: 6), s.qy.rounded(toPlaces: 6),
+             s.qz.rounded(toPlaces: 6), s.qw.rounded(toPlaces: 6)]
+        }
+        if !samples.isEmpty {
+            dict["motion"] = ["hz": 1.0 / MotionSampler.updateInterval,
+                              "half": half, "samples": samples]
+        }
+        if let line = try? JSONSerialization.data(withJSONObject: dict) {
             metaHandle?.write(line)
             metaHandle?.write(Data([0x0A]))
         }
@@ -153,9 +183,19 @@ final class CaptureRecorder {
     func finish() -> (URL, Int)? {
         guard isRecording, let dir else { return nil }
         isRecording = false
+        motionSampler.stop()
+        // 尾帧 meta 在 stop 之后冲刷：其"之后"半窗由已到达样本自然截断
+        flushPendingMeta()
         metaHandle?.closeFile()
         metaHandle = nil
-        if motion.isDeviceMotionAvailable { motion.stopDeviceMotionUpdates() }
         return (dir, frameCount)
+    }
+}
+
+private extension Double {
+    /// 十进制截位（motion 字段控体积用）
+    func rounded(toPlaces p: Int) -> Double {
+        let m = pow(10.0, Double(p))
+        return (self * m).rounded() / m
     }
 }

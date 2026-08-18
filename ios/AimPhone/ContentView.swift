@@ -158,6 +158,9 @@ struct ContentView: View {
         }
         .persistentSystemOverlays(.hidden)   // 沉浸式全屏
         .onAppear {
+            // 相机类 App 惯例：禁止自动锁屏。采集录制（10s 无触摸）中途锁屏会停相机帧，
+            // 录制被截断（2026-08-17 实测：10s 会话只录到头 1s 的 6 帧）
+            UIApplication.shared.isIdleTimerDisabled = true
             streamer.onScanned = { host, port in
                 macHost = host
                 macPort = String(port)
@@ -230,6 +233,15 @@ struct ContentView: View {
                 // 控件层：贴上下边，横竖屏由系统整体旋转；扫码时隐藏连接面板、保留控制胶囊
                 // 眼睛按钮：隐藏时上下容器一起收起，底部只留恢复入口
                 VStack {
+                    // 右上角：标记数徽标（独立于调试 pill，录制时余光可读；
+                    // 不随 uiHidden 隐藏——隐藏 UI 瞄准排障时识别数量正是要看的信息）
+                    if !streamer.scanning {
+                        HStack {
+                            Spacer()
+                            markerBadge
+                        }
+                        .padding(.trailing, 12)
+                    }
                     if !streamer.scanning && !uiHidden {
                         if gimbal.docked {
                             gimbalPill
@@ -495,6 +507,18 @@ struct ContentView: View {
         .glassCapsule()
     }
 
+    // MARK: - 标记数徽标（右上角，与调试 pill 分离）
+    /// 可变 SF Symbol：数字 = 检出标记数（0–8），圆环填充比例 = 数量/8。
+    /// 录制采集会话时余光确认 8 码在画面内；≥4（可建单应）绿色，否则橙色
+    private var markerBadge: some View {
+        Image(systemName: "\(streamer.localMarkerCount).circle",
+              variableValue: Double(streamer.localMarkerCount) / 8)
+            .font(.system(size: 22))
+            .foregroundStyle(streamer.localMarkerCount >= 4 ? Color.green : Color.orange)
+            .padding(8)
+            .glassCircleNeutral()
+    }
+
     // MARK: - 相机不可用兜底（权限拒绝 / 配置失败，不再只给黑屏）
     private func cameraFallback(title: String, icon: String,
                                 reason: String, showSettings: Bool) -> some View {
@@ -733,14 +757,19 @@ struct Crosshair: View {
 
 // MARK: - 横屏鼠标模拟器触控层（protocol.md §8）
 /// 布局比例（按设计稿缩小版）：左右键各 22% 屏宽 × 19% 屏高，贴底部两角，内侧上角大圆角；
-/// 滚轮 14% 屏宽 × 34% 屏高，居中、底部与左右键对齐、明显高出，顶部双圆角。
+/// 滚轮 14% 屏宽 × 34% 屏高，居中、底部与左右键对齐、明显高出，顶部双圆角；
+/// 鼠标总开关（magicmouse 图标）在滚轮与右键之间的空档，与左右键同高同底边。
 /// 交互：左/右键落指发 down、抬指发 up（与真实鼠标一致，支持拖拽，刚性触觉）；
-/// 滚轮竖拖逐格上报滚动（每 14pt 一格 + 刻度反馈），轻点滚轮 = 中键 down+up。
+/// 滚轮竖拖逐格上报滚动（每 14pt 一格 + 刻度反馈），轻点滚轮 = 中键 down+up；
+/// 总开关关闭时整层吞掉全部 down/up/scroll 上报（纯瞄准场景防误触点击 Mac），
+/// 关断瞬间对按住中的键先补发 up，防 Mac 端键卡死在按下态（语义同 §8 断开兜底）。
 struct MousePadOverlay: View {
     var onDown: (String) -> Void        // "left" / "right" / "middle" 按下
     var onUp: (String) -> Void          // 同键抬起
     var onScroll: (Int) -> Void         // 滚轮刻度增量，正 = 向上滚
 
+    /// 鼠标总开关：默认开（保持既有行为），AppStorage 跨启动保留
+    @AppStorage("mousePadEnabled") private var mouseEnabled = true
     @State private var leftDown = false
     @State private var rightDown = false
     @State private var wheelDragging = false
@@ -754,6 +783,9 @@ struct MousePadOverlay: View {
             // 缩小后的触控区：左右键 22% 宽 × 19% 高，滚轮 14% 宽 × 34% 高，位置不变（贴底角/居中）
             let btnW = w * 0.22, btnH = h * 0.19
             let wheelW = w * 0.14, wheelH = h * 0.34
+            // 总开关：与左右键同高同底边，水平居中于「滚轮右缘 — 右键左缘」的空档
+            let toggleW = btnH
+            let toggleOffsetX = (wheelW / 2 + (w - btnW) - w / 2) / 2   // 相对 ZStack 中心的偏移
             ZStack(alignment: .bottom) {
                 HStack(spacing: 0) {
                     mouseButton(side: "left", shape: padShape(topTrailing: btnH * 0.42),
@@ -764,8 +796,15 @@ struct MousePadOverlay: View {
                                 pressed: $rightDown)
                         .frame(width: btnW, height: btnH)
                 }
+                .opacity(mouseEnabled ? 1 : 0.45)   // 关闭时降透明度提示"已停用"
                 scrollWheel(shape: padShape(topLeading: 40, topTrailing: 40))
                     .frame(width: wheelW, height: wheelH)
+                    .opacity(mouseEnabled ? 1 : 0.45)
+                // 用 offset 而非 position 放置：留在 ZStack 布局流内（底部对齐自动），
+                // 命中区域随视图走，避开 position + 状态重建的命中怪异
+                mouseToggle(shape: padShape(topLeading: 20, topTrailing: 20))
+                    .frame(width: toggleW, height: btnH)
+                    .offset(x: toggleOffsetX)
             }
             .frame(width: w, height: h, alignment: .bottom)
         }
@@ -795,6 +834,7 @@ struct MousePadOverlay: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in
+                        guard mouseEnabled else { return }   // 总开关关闭：就地吞掉
                         guard !pressed.wrappedValue else { return }
                         pressed.wrappedValue = true
                         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
@@ -810,6 +850,41 @@ struct MousePadOverlay: View {
     }
 
     private let btnLabelInset: CGFloat = 22
+
+    /// 鼠标总开关（magicmouse 图标）：轻点切换；关闭时本层全部事件就地吞掉不上报
+    /// （见 mouseButton/scrollWheel 的 guard）；关断前对按住中的键补发 up，防 Mac 端键卡死。
+    /// 交互与左右键/滚轮同一套「透明命中底 + DragGesture」实现（本视图已验证可靠），
+    /// 不用 Button——Button 标签内的 glassEffect 玻璃视图命中测试有怪异，会出现关后点不开。
+    /// 开启态图标着色 + 淡白底，关闭态灰白；带 10pt 位移容差，拖动不误触
+    private func mouseToggle(shape: UnevenRoundedRectangle) -> some View {
+        Color.white.opacity(0.001)   // 透明命中底（与 mouseButton 同款）
+            .glassPad(shape)
+            .overlay(shape.fill(.white.opacity(mouseEnabled ? 0.10 : 0)))
+            .overlay {
+                Image(systemName: "magicmouse")
+                    .font(.system(.title3, design: .rounded).weight(.semibold))
+                    .foregroundStyle(mouseEnabled ? Color.accentColor : .white.opacity(0.5))
+            }
+            .contentShape(shape)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onEnded { value in
+                        // 轻点（位移 < 10pt）才切换，从旁边控件拖过来的手势不触发
+                        guard abs(value.translation.height) < 10,
+                              abs(value.translation.width) < 10 else { return }
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        if mouseEnabled { releasePressedButtons() }   // 先补 up 再关
+                        mouseEnabled.toggle()
+                    }
+            )
+            .accessibilityLabel(mouseEnabled ? "关闭鼠标模拟" : "开启鼠标模拟")
+    }
+
+    /// 对按住中的左/右键补发 up 并复位本地按下态（关总开关/防卡键用）
+    private func releasePressedButtons() {
+        if leftDown { leftDown = false; onUp("left") }
+        if rightDown { rightDown = false; onUp("right") }
+    }
 
     /// 滚轮：竖拖逐格滚动（刻度触觉），轻点 = 中键 down+up；拖动时玻璃面高亮
     private func scrollWheel(shape: UnevenRoundedRectangle) -> some View {
@@ -831,6 +906,7 @@ struct MousePadOverlay: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        guard mouseEnabled else { return }   // 总开关关闭：就地吞掉
                         if !wheelDragging {
                             // 落指：仅准备反馈，不立即触发（轻点留给中键）
                             wheelDragging = true
@@ -847,7 +923,8 @@ struct MousePadOverlay: View {
                     }
                     .onEnded { value in
                         // 轻点（无位移）= 中键 down+up
-                        if abs(value.translation.height) < 6 && abs(value.translation.width) < 6 {
+                        if mouseEnabled,
+                           abs(value.translation.height) < 6 && abs(value.translation.width) < 6 {
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                             onDown("middle")
                             onUp("middle")

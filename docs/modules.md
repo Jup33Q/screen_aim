@@ -25,7 +25,7 @@ OpenCV 路径硬编码 `/opt/homebrew/opt/opencv`（Apple Silicon Homebrew），
 
 | API | 说明 |
 |---|---|
-| `ArucoDetector` | 纯 Swift ArUco 检测（DICT_4X4_50 id0–7）：自适应阈值 + 连通域 + 字典匹配；亚像素角点精化（法向剖面 + TLS 直线拟合，`subpixelRefine` 可关）；`maxCandidates` 候选解码上限（按像素数降序截断，防噪点拖垮 decode）；`rejectHistogram` 拒绝原因计数（回放调参用） |
+| `ArucoDetector` | 纯 Swift ArUco 检测（DICT_4X4_50 id0–7）：自适应阈值 + 连通域 + 字典匹配；亚像素角点精化（法向剖面 + TLS 直线拟合，`subpixelRefine` 可关）；候选 prefilter（几何 + 边缘对比指纹）后 `maxCandidates` 解码上限（按四边最弱对比度降序截断，防噪点拖垮 decode）；`rejectHistogram` 拒绝原因计数（回放调参用） |
 | `DetectedMarker` | 检测结果：`id` / `center` / `corners`（帧像素，左上原点） |
 | `Homography` | 3×3 单应：`init(src:dst:)` 四点 DLT；`init(ransacSrc:dst:thresholdPx:maxIter:)` RANSAC + Accelerate `dsyev_` 最小二乘精化（ADR-007） |
 | `AffineTransform` | 二维仿射 6 参数：恰好 3 对对应点 Cramer 闭式解（WP1.1 定位兜底，ADR-013）；不能外推透视，须配合凸包护栏使用 |
@@ -88,6 +88,15 @@ lastMessage 收尾（ADR-008 语义不变）。事件/控制回调全部主线�
 真机数据采集（protocol.md §10/§11）：Mac 控制帧触发，无损 PNG + meta.jsonl 录到临时目录，
 录完经主 TLV 连接 type 10/11 上传（`TLVTransport.uploadCapture`）。全部在
 `aimphone.capture` 队列，UI 零改动（进度复用 `statusText`）。
+WP-I1 起 meta.jsonl 每帧追加 `motion` 字段（帧 PTS ±0.15s 的 100Hz 运动样本，
+只加不删）；meta 因此延迟一帧写出（`pendingMeta`/`flushPendingMeta`）。
+
+### `MotionSampler.swift`
+
+CoreMotion deviceMotion 100Hz 采样器（IMU 辅助定位 WP-I1，docs/imu-fusion-plan.md §1）：
+只采不融，跟随采集会话启停（CaptureRecorder 持有，全 app 唯一 CMMotionManager 持有者），
+样本时间戳与相机帧 PTS 同为 mach boot 时钟。`window(around:half:)` 供 meta 补帧前后样本，
+`latestRotRate()` 供每帧 rotRate 字段。对识别/推流/协议零影响。
 
 ### `GimbalManager.swift`
 

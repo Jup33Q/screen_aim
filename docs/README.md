@@ -14,6 +14,10 @@
 | [development.md](development.md) | 构建、运行、验证、排错清单 | 搭环境 / 出问题时 |
 | [comment-style.md](comment-style.md) | **注释系统规范**：注释分级、模板、标记词、维护约定 | 写/改任何代码前 |
 | [positioning-optimization-plan.md](positioning-optimization-plan.md) | 定位算法优化调研与实施方案（Vision/协议/蓝牙，分 Phase 执行） | 执行定位优化任务前 |
+| [whitedot-latency-plan.md](whitedot-latency-plan.md) | 白点显示滞后优化方案（WP-L1 60Hz 外推已落地为 ADR-015；激活提示词见 whitedot-latency-activation-prompt.md） | 执行滞后优化任务前 |
+| [imu-fusion-plan.md](imu-fusion-plan.md) | IMU（陀螺仪）辅助白点定位方案（WP-I1 采样尖刺 → WP-I2 显示段 IMU 外推 → WP-I3 识别段传播评估；激活提示词见 imu-fusion-activation-prompt.md） | 执行 IMU 融合任务前 |
+| [master-plan.md](master-plan.md) | **总实施路线图**：各子 plan 的调度层——进度盘点、优先级（网络与识别速率优化首位）、B1–B6 批次划分、ADR 编号预留、全局硬约束（激活提示词见 master-activation-prompt.md） | 规划任务 / 决定下一步做什么时 |
+| [update-rate-optimization-plan.md](update-rate-optimization-plan.md) | 更新速率优化方案（2026-08-18 诊断：Debug 构建上真机致 detect_ms 640ms/速率 1.5Hz；P0 Release 固化 → P1 无检出降频 → P2 识别解耦 → P3 降采样 bench → P4 30fps；激活提示词见 update-rate-activation-prompt.md） | 手机端识别慢 / 白点更新率低时 |
 | [transport-26-plan.md](transport-26-plan.md) | 传输层整体迁移方案（**已实施**，2026-08-17）：TLV 消息流单连接复用（9100/`_aimphone._tcp`），旧手工分帧链路已拆除；Wi-Fi Aware 通道终止（ADR-012，macOS SDK 不可用） | 执行任何传输层改造前 |
 | [tlv-migration-plan.md](tlv-migration-plan.md) | TLV 迁移原方案（已并入 transport-26-plan.md，保留为调研背景） | 查 TLV 调研细节 |
 | [wifi-aware-pairing-plan.md](wifi-aware-pairing-plan.md) | Wi-Fi Aware 配对原方案（已并入 transport-26-plan.md，保留为调研背景） | 查 WA 调研细节 |

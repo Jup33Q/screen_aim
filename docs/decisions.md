@@ -2,6 +2,44 @@
 
 每条 = 决策 + 原因 + 推翻它之前要满足的条件。按时间倒序。
 
+## ADR-017 时敏消息独立 TCP 通道：同端口双连接 + hello 角色声明
+
+- **决策**（2026-08-17）：执行 ADR-011 ④ 预留的推翻条款（单连接争用被实测证实）。
+  iPhone 对同一 host:port 开第二条 TLV 连接（fast 通道），建立后先发
+  `{"type":"hello","role":"fast"}` 声明角色，之后专发 localAim；视频/采集/鼠标/
+  其余控制留主连接。Mac 端 `FrameServerV2` 吞掉 hello 并标记连接角色，
+  `onControl` 带 isFast（CSV `src` 记 `tlv-fast` 供 A/B），`onConnect/onDisconnect`
+  改连接计数门控（首连/全断才触发手机级状态翻转）。fast 未就绪时 iPhone 回退
+  主连接发 localAim。配对路径（Bonjour/二维码/手动 IP）零改动。
+- **原因**：localaim CSV 实测 ~22% 行到达间隔 <20ms（成批突发）——200B localAim
+  排在 ~100KB JPEG 后的 TCP 队头阻塞（whitedot-latency-plan §0 #4，~10–30ms +
+  抖动），且突发到达破坏 WP-L1 外推器的匀速到达假设。选**同端口双连接**而非
+  独立端口：三条配对路径不必加端口字段、无版本错位；选 **TCP 而非 UDP**
+  （WP-L3 维持暂缓）：丢包/乱序语义成本高，主要 HoL 项靠第二条 TCP 流即可消除。
+- **推翻条件**：双通道后 CSV 成批比例仍未显著下降（说明瓶颈不在传输排队，
+  转查 WP-L2 提频或滤波段）；或双连接在目标网络下引入新争用（退回单连接，
+  fast 通道代码保留但不启用）。
+
+## ADR-016 启用 TLV type 2 Codable 信封：白点 × UI 重叠 → iPhone 震动反馈
+
+- **决策**（2026-08-17）：推翻 P3「type 2 不启用」结论（protocol.md §11）。
+  `ScreenAimCore.AimMessage`（Codable enum，JSONEncoder 默认 enum 编码）作为
+  type 2 信封双端同源；首条消息 `aimUIHover(overlapping:)`（Mac → iPhone）：
+  `Calibrator.updateDotUIOverlap` 在 `placeAimDot`（三处摆点路径唯一漏斗）末尾
+  实时求交白点与**顶部控制面板 NSPanel + 8 个定位码白卡**（frame 不缓存，
+  滑杆 rebuild 后面板/白卡几何自动跟随），边沿翻转即 `FrameServerV2.send`
+  广播；白点隐藏路径（断连 / 滑行耗尽）经 `resetDotUIOverlap` 复位边沿状态。
+  iPhone 端 `TLVTransport` 接收循环路由 type 2 → `CameraStreamer.handleMessage`，
+  进入重叠（`overlapping == true`）时 `UIImpactFeedbackGenerator(.light)` 震一次，
+  离开不震。存量 type 1 控制消息不迁移。
+- **原因**：用户明确要求结构化消息用 Codable enum（类型安全、双端同源），
+  且震动信号是瞬态边沿事件——与 type 1 的 JSON 字典消息相比，enum case 的
+  编译期完整性检查对「新增信号双端同步」更省事；只加不迁保持向后兼容
+  （旧 iPhone 接收循环只认 type 1，type 2 自动忽略）。
+- **推翻条件**：type 2 消息增长到需要版本协商或二进制体积敏感时——先在
+  `AimMessage` 内加 case 解决；真要换编码（如二进制），新占一个 type 号，
+  不要改动 type 2 既有线上格式。
+
 ## ADR-015 Mac 显示段 60Hz 匀速死推算外推摆点（WP-L1）
 
 - **决策**（2026-08-17，方案 docs/whitedot-latency-plan.md §1）：`Calibrator` 起

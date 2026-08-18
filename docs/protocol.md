@@ -186,7 +186,9 @@ iPhone 端 `CameraStreamer.toggleMacPairingQR` 发送。
 - Mac 标定层面板的 record 按钮发送（`Calibrator.captureButton`）；旧版 iPhone 忽略未知 type
 - iPhone 端 `CaptureRecorder` 在 `aimphone.capture` 队列逐帧抽录：BGRA → **无损 PNG**
   （禁止重编码，回放须像素级复现检测器输入）+ `meta.jsonl` 逐帧元数据
-  （seq/PTS/ISO/曝光/变焦/角速度/线上检测结果 ids+centers/aim/detect_ms）
+  （seq/PTS/ISO/曝光/变焦/角速度/线上检测结果 ids+centers/aim/detect_ms；
+  WP-I1 起追加可选 `motion` 字段：该帧 PTS ±0.15s 的 100Hz deviceMotion 样本
+  `[dt,wx,wy,wz,qx,qy,qz,qw]`，dt 相对 PTS 秒，只加不删，旧分析工具照常工作）
 - 到时自动停止或收到 captureStop；预估体积 >200MB 或磁盘不足会拒绝启动（状态文案提示）
 
 **回传**（iPhone → Mac）【旧独立连接已移除，见 §11】：
@@ -217,7 +219,7 @@ Network.framework 26+ 结构化并发 API（NetworkListener / NetworkConnection�
 |---|---|---|
 | 0 | iPhone→Mac | 视频帧 JPEG（≈15fps，参数同 §1） |
 | 1 | 双向 | 控制 JSON：calib↓/pairingQR↓/captureStart·Stop↓，togglePairingQR/localAim/mouse*/disconnect↑（消息 schema 与 §6/§7/§8 完全一致，仅分帧方式改变） |
-| 2 | （预留） | Coder(AimMessage) 信封枚举，P3 评估启用 |
+| 2 | 双向 | Codable `AimMessage` 信封（JSON，Swift 默认 enum 编码，双端共享 ScreenAimCore）：`aimUIHover(overlapping:)` Mac→iPhone 白点悬停 UI 震动信号（ADR-016）。新结构化消息走这里，存量 type 1 消息不迁移 |
 | 10 | iPhone→Mac | 采集 session/end 记录（纯 JSON，schema：session=设备型号/系统版本；end=帧数+角速度峰值） |
 | 11 | iPhone→Mac | 采集帧复合 payload：`[4B 大端 jsonLen][json][PNG]`（json = meta.jsonl 一行） |
 
@@ -233,9 +235,11 @@ Network.framework 26+ 结构化并发 API（NetworkListener / NetworkConnection�
   本地网络授权弹窗期卡死问题在 Bonjour/IP 路径依然存在（§4）
 - **两端必须 `TCP().noDelay(true)`**：新 API 的 `TCP()` 默认 Nagle 开启，会把 15fps 的
   小控制消息攒批成 ~200ms 一坨（真机实测 localAim 批量突发、白点阶梯滞后）
-- type 2 评估结论（P3）：**不启用** Coder 信封枚举——控制消息小且低频（≤200B），
-  `JSONSerialization` 现状够用，Coder 的类型安全收益不足以抵消双端信封枚举同步成本；
-  type 2 继续预留，控制消息真要 schema 化时再启用
+- type 2 评估结论（P3）：当时**不启用** Coder 信封枚举——控制消息小且低频（≤200B），
+  `JSONSerialization` 现状够用。ADR-016 起**已启用**：白点 × UI 重叠悬停信号
+  （`aimUIHover`）作为首个 type 2 消息落地，Codable enum 双端同源（ScreenAimCore）；
+  存量 type 1 控制消息不迁移（旧 iPhone 接收循环只认 type 1，type 2 自动忽略，
+  向后兼容机制不变）；后续新结构化消息一律进 `AimMessage`，只加 case 不改既有 case
 
 **端口与服务（P3 收敛后）**：
 
@@ -244,6 +248,26 @@ Network.framework 26+ 结构化并发 API（NetworkListener / NetworkConnection�
 | 9100（servePort） | `_aimphone._tcp` | **TLV（本节），唯一传输服务** |
 
 （历史：过渡期曾并存 9100 旧手工分帧 + 9101 旧采集 + 9102/`_aimphone2._tcp` TLV，P3 已全部撤除）
+
+**时敏双通道（ADR-017，只加不删）**：localAim 白点数据对到达抖动敏感——与 ~100KB
+JPEG 视频帧同一条 TCP 流时存在队头阻塞（200B 控制帧排在视频帧后出队，到达成批突发）。
+iPhone 因此对**同一 host:port** 开第二条 TLV 连接（fast 通道）专发 localAim，
+配对路径（Bonjour/二维码/手动 IP）零改动：
+
+```json
+{"type":"hello","role":"fast"}
+```
+
+- fast 连接建立后 iPhone 立即发 hello 声明角色，之后该连接只承载 localAim
+  （type 1，schema 不变）；Mac 收到 hello 标记该连接为 fast、吞掉不转发业务层
+- 视频/采集/鼠标/其余控制留主连接；Mac → iPhone 下行广播维持对所有连接发送
+  （fast 连接收到的 calib/pairingQR 由接收循环排空丢弃）
+- Mac 端连接级回调按计数门控：首连才 onConnect（隐藏 QR）、全断才 onDisconnect
+  （鼠标键兜底），fast 连接的建立/断开不触发手机级状态翻转
+- localAim CSV 的 `src` 列：fast 通道记 `tlv-fast`，主连接记 `tlv`（A/B 对照用）
+- 兼容矩阵（任意组合不断连，优化单向生效）：新 iPhone + 旧 Mac——hello 按未知
+  type 忽略，localAim 从两条连接照常处理；旧 iPhone + 新 Mac——无第二连接，
+  Mac 行为同现状；fast 未就绪时 iPhone 回退主连接发 localAim，白点不中断
 
 ## 12. Wi-Fi Aware 通道（已终止，待生态成熟）
 

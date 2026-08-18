@@ -525,6 +525,14 @@ final class Calibrator: NSObject {
     /// iPhone 数据流瞄准点白点覆盖层：位置完全来自 protocol.md §7 localAim 上报
     /// （手机本机识别结果），与 Mac 端视频帧识别管线无关；滑行预算耗尽/断连时隐藏
     var aimDot: NSView?
+    /// 顶部控制面板 NSPanel（配对码开关/采集按钮/滑杆）；白点 × UI 重叠检测用
+    var controlPanel: NSWindow?
+    /// 白点 × UI 重叠信号发送（TLV type 2 AimMessage，protocol.md §11）：
+    /// run() 里 FrameServerV2 创建后接线；非推流模式为 nil（无手机可发）
+    var sendAimMessage: ((AimMessage) -> Void)?
+    /// 白点当前是否压在 UI 上（顶部控制面板 / 定位码白卡）的边沿状态：主线程，
+    /// 翻转时经 sendAimMessage 发 .aimUIHover（iPhone 端进入重叠震动一次）
+    private var dotOverUI = false
     /// Mac 显示段滤波（WP3.3 分层解耦，ADR-014）：iPhone 识别段已强消抖，本段只做
     /// ≈15Hz 上报（ADR-009）→ 显示的插值平滑 + 跳变门 + 断流滑行，不重复消抖
     /// （双段都强消抖时横扫滞后叠加）。断流帧白点按速度衰减外推滑行（WP3.2，
@@ -552,6 +560,37 @@ final class Calibrator: NSObject {
         dot.frame = NSRect(x: cx - d / 2, y: screenH - cy - d / 2,
                            width: d, height: d)
         dot.isHidden = false
+        updateDotUIOverlap()
+    }
+
+    /// 白点 × UI 重叠检测（ADR-016）：aimDot 与顶部控制面板 / 定位码白卡求交，
+    /// 边沿翻转时经 TLV type 2 发 .aimUIHover（iPhone 端进入重叠震动一次）。
+    /// frame 每次实时读不缓存（滑杆 rebuild 后 markerCards 重建、面板可移动）；
+    /// 60Hz 外推定时器也走这里，9 个矩形求交开销可忽略。主线程调用
+    private func updateDotUIOverlap() {
+        guard let dot = aimDot, let win = window else { return }
+        let dotRect = win.convertToScreen(dot.frame)
+        var over = false
+        if let panel = controlPanel, panel.isVisible,
+           dotRect.intersects(panel.frame) { over = true }
+        if !over {
+            for card in markerCards {
+                let cardRect = win.convertToScreen(card.convert(card.bounds, to: nil))
+                if dotRect.intersects(cardRect) { over = true; break }
+            }
+        }
+        guard over != dotOverUI else { return }
+        dotOverUI = over
+        print("白点悬停 UI: \(over ? "进入" : "离开")，已发 aimUIHover")
+        sendAimMessage?(.aimUIHover(overlapping: over))
+    }
+
+    /// 白点直接隐藏的路径（断连 / 滑行耗尽）复位重叠边沿状态，
+    /// 避免状态卡在 true 导致下次进入重叠时丢边沿
+    private func resetDotUIOverlap() {
+        guard dotOverUI else { return }
+        dotOverUI = false
+        sendAimMessage?(.aimUIHover(overlapping: false))
     }
     var centers: [CGPoint] = []        // 当前 8 个标记中心的屏幕点坐标（左上角原点）
     var markerCards: [NSView] = []     // 当前 8 块白卡视图（rebuildMarkers 重建）
@@ -918,15 +957,14 @@ final class Calibrator: NSObject {
                 win.contentView?.addSubview(dbgBg)
                 debugLabel = dbg
 
-                // iPhone 数据流瞄准点白点（protocol.md §7 localAim）：白底细黑边，
-                // 深浅桌面都可见；初始隐藏，收到首个有效瞄准点才显示
+                // iPhone 数据流瞄准点白点（protocol.md §7 localAim）：Liquid Glass
+                // 质感（clear 玻璃 + 白着色，同配对码白模块的深浅桌面可见性思路）；
+                // 初始隐藏，收到首个有效瞄准点才显示
                 let dotD: CGFloat = 14
-                let dot = NSView(frame: NSRect(x: 0, y: 0, width: dotD, height: dotD))
-                dot.wantsLayer = true
-                dot.layer?.backgroundColor = NSColor.white.cgColor
-                dot.layer?.cornerRadius = dotD / 2
-                dot.layer?.borderWidth = 1.5
-                dot.layer?.borderColor = NSColor.black.withAlphaComponent(0.6).cgColor
+                let dot = NSGlassEffectView(frame: NSRect(x: 0, y: 0, width: dotD, height: dotD))
+                dot.style = .clear
+                dot.cornerRadius = dotD / 2
+                dot.tintColor = NSColor.white.withAlphaComponent(0.85)
                 dot.isHidden = true
                 win.contentView?.addSubview(dot)
                 aimDot = dot
@@ -964,6 +1002,8 @@ final class Calibrator: NSObject {
                 }
                 // TLV 单连接服务（protocol.md §11；P3 收敛后唯一传输服务，9100/_aimphone._tcp）
                 let server = FrameServerV2(port: port, onFrame: processFrame)
+                // 白点 × UI 重叠信号（TLV type 2，ADR-016）：边沿翻转即广播给已连手机
+                sendAimMessage = { server.send($0) }
                 // 瞄准点绑定光标（--aim-cursor）：手机帧识别出的屏幕点直接 warp 鼠标，
                 // 与 §8 触控点击配合 = 手机瞄哪里点哪里。瞄准点是主屏点坐标（左上角原点），
                 // 与 Quartz 全局坐标系一致，直接传入；钳制在屏内防止单应外推甩飞光标
@@ -1037,18 +1077,23 @@ final class Calibrator: NSObject {
                     return bg
                 }
                 // SF Symbol 图标按钮（无文字）
+                let btnSymbolCfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
                 func makeSymbolButton(symbol: String, tint: NSColor, tooltip: String,
                                       bg: NSView) -> ActionButton {
                     let b = ActionButton(frame: bg.bounds)
-                    let cfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
                     b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
-                        .withSymbolConfiguration(cfg)
+                        .withSymbolConfiguration(btnSymbolCfg)
                     b.title = ""
                     b.imagePosition = .imageOnly
                     b.contentTintColor = tint
                     b.toolTip = tooltip
                     bg.addSubview(b)
                     return b
+                }
+                /// 切换按钮符号图标（采集按钮的 录制/停止 态切换用；配置与 makeSymbolButton 一致）
+                func setButtonSymbol(_ b: ActionButton, _ name: String) {
+                    b.image = NSImage(systemSymbolName: name, accessibilityDescription: b.toolTip)?
+                        .withSymbolConfiguration(btnSymbolCfg)
                 }
                 let btnBg = makeBtnBg(x: 0, w: qrBtnW)
                 let closeBg = makeBtnBg(x: qrBtnW + btnGap, w: closeBtnW)
@@ -1065,7 +1110,8 @@ final class Calibrator: NSObject {
                     NSApp.terminate(nil)
                 }
                 // 数据采集按钮（protocol.md §10）：点击下发 captureStart（10s@5fps），
-                // 录制中变红，再点提前停止；采集上传收完后自动复位颜色
+                // 录制中变红并切换为方块停止图标（仅红白变色分不清哪边是停止态），
+                // 再点提前停止；采集上传收完后自动复位图标与颜色
                 let recBg = makeBtnBg(x: qrBtnW + closeBtnW + btnGap * 2, w: recBtnW)
                 let recBtn = makeSymbolButton(symbol: "record.circle", tint: .white,
                                               tooltip: "采集 10 秒识别数据（手机回传，落盘 scenes/）",
@@ -1083,6 +1129,10 @@ final class Calibrator: NSObject {
                     }
                     self.capturing.toggle()
                     recBtn.contentTintColor = self.capturing ? .systemRed : .white
+                    setButtonSymbol(recBtn, self.capturing ? "stop.circle.fill" : "record.circle")
+                    recBtn.toolTip = self.capturing
+                        ? "停止采集并等待回传"
+                        : "采集 10 秒识别数据（手机回传，落盘 scenes/）"
                 }
                 captureButton = recBtn
                 // 定位码大小滑杆：拖动实时重建四角标记、更新 Mac 端映射表并把新标定表广播给已连手机。
@@ -1230,9 +1280,10 @@ final class Calibrator: NSObject {
                     })
                 }
                 btnPanel.orderFrontRegardless()
-                objc_setAssociatedObject(win, "btnPanel", btnPanel, .OBJC_ASSOCIATION_RETAIN)
+                controlPanel = btnPanel   // 白点 × UI 重叠检测引用（属性保活）
                 // 手机端控制消息（protocol.md §7/§8/§11）：配对二维码开关 / 本机识别结果上报 / 鼠标模拟器。
-                // src 为链路来源标签（旧链路 tcp / TLV 链路 tlv），只进 localAim CSV 的 src 列
+                // src 为链路来源标签（TLV 主连接 tlv / fast 时敏通道 tlv-fast，ADR-017；
+                // 旧链路历史数据 tcp），只进 localAim CSV 的 src 列
                 let handlePhoneControl: ([String: Any], String) -> Void = { [weak self] msg, src in
                     switch msg["type"] as? String {
                     case "mouseDown", "mouseUp":
@@ -1275,6 +1326,7 @@ final class Calibrator: NSObject {
                         self?.releaseStuckMouseButtons()   // §8：按住中断连，补发 up 防键卡死
                         DispatchQueue.main.async {
                             self?.aimDot?.isHidden = true   // 数据流中断，白点隐藏
+                            self?.resetDotUIOverlap()       // 重叠边沿状态随隐藏复位
                             self?.dotFilter.reset()         // 滤波器随白点隐藏重置，重连后不被过期状态拖走
                             self?.dotNoAimFrames = 0
                             self?.setMarkerActivation([])   // 绿边全部失效
@@ -1333,6 +1385,7 @@ final class Calibrator: NSObject {
                                     self?.placeAimDot(at: out.point)
                                 } else {
                                     self?.aimDot?.isHidden = true   // 滑行预算耗尽，白点隐藏
+                                    self?.resetDotUIOverlap()       // 重叠边沿状态随隐藏复位
                                 }
                                 // 连续 10 帧无瞄准点才重置滤波器：单帧掉检不重置，
                                 // 恢复后白点从滤波状态平滑出现而非跳变
@@ -1349,7 +1402,7 @@ final class Calibrator: NSObject {
                         break
                     }
                 }
-                server.onControl = { msg in handlePhoneControl(msg, "tlv") }
+                server.onControl = { msg, fast in handlePhoneControl(msg, fast ? "tlv-fast" : "tlv") }
                 // 监听失败（典型：端口被旧实例占用）→ 弹窗说明并退出，
                 // 绝不留着没有服务能力的二维码继续显示（僵尸二维码）
                 server.onListenerFailed = { err in
@@ -1379,6 +1432,10 @@ final class Calibrator: NSObject {
                 server.onCaptureDone = { [weak self] _ in
                     self?.capturing = false
                     self?.captureButton?.contentTintColor = .white
+                    if let b = self?.captureButton {
+                        setButtonSymbol(b, "record.circle")
+                        b.toolTip = "采集 10 秒识别数据（手机回传，落盘 scenes/）"
+                    }
                 }
             } catch {
                 // 同步 throw（如非法端口）：同样不允许带病运行

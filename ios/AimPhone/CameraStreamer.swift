@@ -57,6 +57,9 @@ final class CameraStreamer: NSObject, ObservableObject {
     private let captureRecorder = CaptureRecorder()
     /// TLV 传输（protocol.md §11，P3 起唯一传输路径；旧 NWConnection 手工分帧实现已拆除）
     private let tlvTransport = TLVTransport()
+    /// fast 时敏通道（ADR-017）：主连接就绪后对同一端点开第二条 TLV 连接，专发 localAim，
+    /// 躲开视频 JPEG 的 TCP 队头阻塞；断开兜底/下行控制仍只属于主连接
+    private let fastTransport = TLVTransport()
 
     /// 实时亮度调节：v ∈ 0...1 映射到 ISO [minISO, minISO × 10]
     func setBrightness(_ v: Float) {
@@ -121,6 +124,15 @@ final class CameraStreamer: NSObject, ObservableObject {
         // TLV 传输（新协议，protocol.md §11）：事件/控制回调接线，状态文案与旧路径一致
         tlvTransport.onEvent = { [weak self] e in self?.handleTLVEvent(e) }
         tlvTransport.onControl = { [weak self] data in self?.handleControl(data) }
+        tlvTransport.onMessage = { [weak self] msg in self?.handleMessage(msg) }
+        // fast 通道（ADR-017）：事件只打日志不碰 UI 状态；就绪即声明角色（hello，§11）；
+        // Mac 广播到本连接的 calib/pairingQR 由接收循环自然排空丢弃，不接 onControl/onMessage
+        fastTransport.onEvent = { [weak self] e in
+            print("FASTCONN \(e)")
+            if case .ready = e {
+                self?.fastTransport.sendControl(["type": "hello", "role": "fast"])
+            }
+        }
         // 默认映射表：Calibrator 默认参数（markerSize 48 / inset 24，ADR-010）在 1728×1117 屏上的
         // 8 个标记中心（m+s/2 = 48；W/2 = 864；H/2 = 558.5；上中标记的刘海偏移由 Mac 下发修正）
         localizer.screenCornerMap = [
@@ -239,6 +251,10 @@ final class CameraStreamer: NSObject, ObservableObject {
             // 连上后停止 Bonjour 浏览
             browser?.cancel()
             browser = nil
+            // fast 时敏通道（ADR-017）：主连接就绪后复用同一端点开第二连接（专发 localAim）
+            if let ep = tlvTransport.lastEndpoint {
+                fastTransport.connect(endpoint: ep.endpoint, label: ep.label)
+            }
         case .waiting:
             statusText = "等待网络…（若弹出本地网络授权请点允许）"
         case .retrying(let text):
@@ -247,6 +263,7 @@ final class CameraStreamer: NSObject, ObservableObject {
             isConnecting = false
             connectionError = true
             statusText = text
+            fastTransport.close()   // fast 通道随主连接终态失败静默断开
         case .disconnected(let text):
             // NOTE: 已建立的连接意外断开必须清状态，
             // 否则 isConnected 卡 true，扫码按钮被隐藏、scanQRCode 被 guard 拦截
@@ -254,6 +271,7 @@ final class CameraStreamer: NSObject, ObservableObject {
             pairingQRVisibleOnMac = false
             connectionError = true
             statusText = "连接已断开: \(text)"
+            fastTransport.close()   // fast 通道随主连接静默断开
             startBrowsing()   // 非手动断开：允许 Bonjour 自动找回
         }
     }
@@ -295,6 +313,7 @@ final class CameraStreamer: NSObject, ObservableObject {
         // transport 内部补发 mouseUp all + disconnect 兜底帧（protocol.md §7/§8，ADR-008），
         // lastMessage 收尾保证通知帧先于 FIN
         tlvTransport.disconnectGracefully()
+        fastTransport.close()   // fast 通道静默断开（无兜底帧语义，ADR-017）
         DispatchQueue.main.async {
             self.isConnected = false
             self.pairingQRVisibleOnMac = false
@@ -459,7 +478,9 @@ extension CameraStreamer {
             // 输出等级（WP1，protocol.md §7：只加不删，旧版 Mac 忽略该字段）
             if let q = result.quality { msg["quality"] = q.rawValue }
         }
-        sendControl(msg)
+        // localAim 走 fast 时敏通道（ADR-017：躲开视频 JPEG 的 TCP 队头阻塞）；
+        // fast 未就绪回退主连接，白点不中断（只是回到旧 HoL 行为）
+        (fastTransport.isConnected ? fastTransport : tlvTransport).sendControl(msg)
         // 数据采集（protocol.md §10）：录制中则抽帧落盘；到点自动 finish 并上传。
         // 注意此时 pb 仍持锁（本函数 defer 解锁），PNG 编码可以直接读
         captureRecorder.record(pb: pb, pts: timestamp, result: result, detectMs: detectMs)
@@ -534,6 +555,18 @@ extension CameraStreamer {
             }
         default:
             break
+        }
+    }
+
+    /// 处理 Mac 下发的结构化消息（TLV type 2 Codable 信封，protocol.md §11；主线程）
+    private func handleMessage(_ msg: AimMessage) {
+        switch msg {
+        case .aimUIHover(let overlapping):
+            // 白点进入 ScreenAim 悬浮 UI（顶部控制面板 / 定位码白卡）震一次（边沿触发，
+            // 离开不震）；震感样式与 ContentView 既有轻反馈一致
+            if overlapping {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
         }
     }
 }
